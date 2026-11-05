@@ -160,18 +160,8 @@ function computeAnswer(qData, mode, choiceCount) {
 }
 
 function banner() {
-  console.log(color('  ╔══════════════════════════════════════════════════════╗', 'cyan'));
-  console.log(color('  ║                                                      ║', 'cyan'));
-  console.log(color('  ║   ██╗ ███████╗   ██╗  ██╗ █████╗ ██╗  ██╗  ██████╗   ║', 'cyan'));
-  console.log(color('  ║   ██║ ╚══███╔╝   ██║  ██║██╔══██╗██║  ██║ ██╔═══██╗  ║', 'cyan'));
-  console.log(color('  ║   ██║   ███╔╝    ███████║███████║███████║ ██║   ██║  ║', 'cyan'));
-  console.log(color('  ║   ██║  ███╔╝     ██╔══██║██╔══██║██╔══██║ ██║   ██║  ║', 'cyan'));
-  console.log(color('  ║   ██║ ███████╗   ██║  ██║██║  ██║██║  ██║ ╚██████╔╝  ║', 'cyan'));
-  console.log(color('  ║   ╚═╝ ╚══════╝   ╚═╝  ╚═╝╚═╝  ╚═╝╚═╝  ╚═╝  ╚═════╝   ║', 'cyan'));
-  console.log(color('  ║                                                      ║', 'cyan'));
-  console.log(color('  ║        JZ KAHOOT BOT  -  V3.0  -  TERMUX             ║', 'magenta'));
-  console.log(color('  ║   Auto Answer + Flooder  |  Shift+Q = stop           ║', 'gray'));
-  console.log(color('  ╚══════════════════════════════════════════════════════╝', 'cyan'));
+  console.log(color('  JZ KAHOOT BOT  -  V3.2  -  TERMUX', 'cyan'));
+  console.log(color('  Auto Answer + Flooder  |  Shift+Q = stop', 'gray'));
   console.log('');
 }
 
@@ -375,39 +365,16 @@ async function runFlooder() {
   console.log(color('  [*] Paina Iso Q lopettaaksesi.', 'gray'));
 }
 
-// ---------- Test (simuloitu) ----------
-async function runTest() {
-  console.log(color('  [ TEST / SIMULOITU ]', 'bold'));
-  const mockKey = [
-    { type: 'quiz', question: 'Pääkaupunki?', choices: [{ answer: 'Oslo', correct: false }, { answer: 'Helsinki', correct: true }, { answer: 'Tukholma', correct: false }, { answer: 'Kööpenhamina', correct: false }] },
-    { type: 'multiple_select_quiz', question: 'Valitse parilliset', choices: [{ answer: '2', correct: true }, { answer: '3', correct: false }, { answer: '4', correct: true }] },
-    { type: 'open_ended', question: 'Mikä on 2+2?', choices: [{ answer: '4', correct: true }] },
-    { type: 'jumble', question: 'Järjestä', choices: [{ answer: 'A' }, { answer: 'B' }, { answer: 'C' }, { answer: 'D' }] }
-  ];
-  for (const mode of ['1', '2']) {
-    console.log(color(`  Mode ${mode}:`, 'cyan'));
-    for (let qi = 0; qi < mockKey.length; qi++) {
-      const qData = mockKey[qi];
-      const choiceCount = Array.isArray(qData.choices) ? qData.choices.length : 4;
-      const { answerToSend, know, wrong } = computeAnswer(qData, mode, choiceCount);
-      console.log(`    Q${qi + 1} ${qData.type}: vastaus=${Array.isArray(answerToSend) ? answerToSend.join(',') : answerToSend} ${know ? (wrong ? '(tahallinen virhe)' : '(oikein)') : '(arvaus)'}`);
-    }
-  }
-  console.log(color('  Test valmis - logiikka toimii.', 'green'));
-}
-
 // ---------- Main ----------
 async function main() {
   banner();
   console.log(color('  Valitse toiminto:', 'bold'));
   console.log(color('  1 = Auto Answer Bot', 'green'));
   console.log(color('  2 = Flooder', 'red'));
-  console.log(color('  3 = Test (simuloitu, ei verkkoa)', 'yellow'));
   console.log('');
-  const c = (await ask('  Valinta (1/2/3): ')).trim();
+  const c = (await ask('  Valinta (1/2): ')).trim();
   if (c === '1') await runAutoAnswer();
   else if (c === '2') await runFlooder();
-  else if (c === '3') await runTest();
   else { console.log(color('  Virheellinen valinta.', 'red')); process.exit(0); }
 
   setInterval(() => {}, 60000);
