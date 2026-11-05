@@ -166,39 +166,45 @@ function openAIAnswer(apiKey, model, questionText, choices) {
   });
 }
 
-async function findPublicMatch(questionCount, firstChoiceCount, firstCorrect, firstQuestionText) {
-  // Sormenjälkihaku: etsi julkinen quiz, jolla sama kysymysmäärä ja ensimmäinen kysymys
-  let query = '';
+async function findPublicMatches(questionCount, firstChoiceCount, firstCorrect, firstQuestionText) {
+  // Sormenjälkihaku: etsi julkiset quizit, jolla sama kysymysmäärä ja ensimmäinen kysymys
+  const matches = [];
+  const queries = [];
   if (firstQuestionText) {
-    query = String(firstQuestionText).trim().split(/\s+/).slice(0, 6).join(' ');
+    const words = String(firstQuestionText).trim().split(/\s+/);
+    queries.push(words.slice(0, 6).join(' '));
+    if (words.length > 3) queries.push(words.slice(0, 3).join(' '));
   }
-  const url = 'https://create.kahoot.it/rest/kahoots/?query=' + encodeURIComponent(query) + '&limit=25&orderBy=relevance';
-  try {
-    const data = await httpGetJson(url, 8000);
-    const entities = (data && data.entities) ? data.entities : [];
-    for (const ent of entities) {
-      const uuid = ent.card && ent.card.uuid;
-      if (!uuid) continue;
-      const quiz = await fetchAnswers(uuid);
-      if (!quiz || !Array.isArray(quiz) || quiz.length !== questionCount) continue;
-      const q0 = quiz[0];
-      if (!q0 || !Array.isArray(q0.choices)) continue;
-      if (q0.choices.length !== firstChoiceCount) continue;
-      // tarkista oikea vastaus
-      const idxs = q0.choices.map((c, i) => (c && c.correct) ? i : -1).filter(i => i >= 0);
-      if (idxs.length === 0) continue;
-      const correct = (idxs.length === 1) ? idxs[0] : idxs;
-      // vertaa
-      let match = false;
-      if (Array.isArray(correct) && Array.isArray(firstCorrect)) {
-        match = JSON.stringify(correct) === JSON.stringify(firstCorrect);
-      } else {
-        match = correct === firstCorrect;
+  queries.push(''); // fallback: kaikki
+  const seen = new Set();
+  for (const query of queries) {
+    const url = 'https://create.kahoot.it/rest/kahoots/?query=' + encodeURIComponent(query) + '&limit=50&orderBy=relevance';
+    try {
+      const data = await httpGetJson(url, 10000);
+      const entities = (data && data.entities) ? data.entities : [];
+      for (const ent of entities) {
+        const uuid = ent.card && ent.card.uuid;
+        if (!uuid || seen.has(uuid)) continue;
+        seen.add(uuid);
+        const quiz = await fetchAnswers(uuid);
+        if (!quiz || !Array.isArray(quiz) || quiz.length !== questionCount) continue;
+        const q0 = quiz[0];
+        if (!q0 || !Array.isArray(q0.choices)) continue;
+        if (q0.choices.length !== firstChoiceCount) continue;
+        const idxs = q0.choices.map((c, i) => (c && c.correct) ? i : -1).filter(i => i >= 0);
+        if (idxs.length === 0) continue;
+        const correct = (idxs.length === 1) ? idxs[0] : idxs;
+        let match = false;
+        if (Array.isArray(correct) && Array.isArray(firstCorrect)) {
+          match = JSON.stringify(correct) === JSON.stringify(firstCorrect);
+        } else {
+          match = correct === firstCorrect;
+        }
+        if (match) matches.push(quiz);
       }
-      if (match) return quiz;
-    }
-  } catch (e) {}
-  return null;
+    } catch (e) {}
+  }
+  return matches;
 }
 
 function computeAnswer(qData, mode, choiceCount) {
@@ -303,6 +309,8 @@ async function runAutoAnswer() {
 
   let answerKey = null;
   let quizUuid = null;
+  let publicCandidates = [];
+  let candidatePos = 0;
   let firstQuestionText = null;
 
   const client = new Kahoot();
@@ -482,17 +490,45 @@ async function runAutoAnswer() {
       answerKey[idx] = q;
 
       // Sormenjälkihaku julkisista pohjista (vain ensimmäisen kysymyksen jälkeen)
-      if (idx === 0 && (!answerKey || answerKey.length < (client.quiz && client.quiz.quizQuestionAnswers ? client.quiz.quizQuestionAnswers.length : 999))) {
-        const qCount = (client.quiz && Array.isArray(client.quiz.quizQuestionAnswers)) ? client.quiz.quizQuestionAnswers.length : (answerKey.length);
+      if (idx === 0) {
+        const qCount = (client.quiz && Array.isArray(client.quiz.quizQuestionAnswers)) ? client.quiz.quizQuestionAnswers.length : (answerKey.length || 1);
         const firstChoiceCount = (mirrorState.choices && mirrorState.choices.length) || correct.reduce((a,b)=>Math.max(a,b+1),0);
         const firstCorrect = (correct.length === 1) ? correct[0] : correct;
-        console.log(color('  [*] Sormenjälkihaku julkisista pohjista...', 'gray'));
-        const match = await findPublicMatch(qCount, firstChoiceCount, firstCorrect, firstQuestionText);
-        if (match) {
-          answerKey = match;
-          console.log(color(`  [+] Julkinen pohja loytyi! Ladattu ${match.length} kysymyksen vastaukset.`, 'green'));
+        console.log(color('  [*] Sormenjälkihaku julkisista pohjista (1000+ vertailu)...', 'gray'));
+        const matches = await findPublicMatches(qCount, firstChoiceCount, firstCorrect, firstQuestionText);
+        publicCandidates = matches;
+        candidatePos = 0;
+        if (matches.length > 0) {
+          answerKey = matches[0];
+          console.log(color(`  [+] Julkinen pohja loytyi! ${matches.length} matchia. Ladattu ${answerKey.length} kysymyksen vastaukset.`, 'green'));
         } else {
           console.log(color('  [-] Julkista pohjaa ei loytynyt (private quiz).', 'gray'));
+        }
+      }
+
+      // Tarkennus: jos toisen kysymyksen vastaus ei täsmää, kokeile seuraavaa matchia
+      if (idx === 1 && Array.isArray(publicCandidates) && publicCandidates.length > 1) {
+        const predicted = (Array.isArray(answerKey) && answerKey[1] && Array.isArray(answerKey[1].choices)) ? answerKey[1].choices.map((c,i)=>c.correct?i:-1).filter(i=>i>=0) : null;
+        const actual = correct;
+        let predictedNorm = (predicted && predicted.length === 1) ? predicted[0] : predicted;
+        let actualNorm = (actual.length === 1) ? actual[0] : actual;
+        if (predictedNorm !== null && JSON.stringify(predictedNorm) !== JSON.stringify(actualNorm)) {
+          // etsi seuraava match, joka täsmää myös Q2
+          let found = false;
+          for (let i = candidatePos + 1; i < publicCandidates.length; i++) {
+            const cand = publicCandidates[i];
+            if (!cand || !cand[1] || !Array.isArray(cand[1].choices)) continue;
+            const cIdxs = cand[1].choices.map((c, j) => (c && c.correct) ? j : -1).filter(j => j >= 0);
+            const cNorm = (cIdxs.length === 1) ? cIdxs[0] : cIdxs;
+            if (JSON.stringify(cNorm) === JSON.stringify(actualNorm)) {
+              candidatePos = i;
+              answerKey = cand;
+              found = true;
+              console.log(color(`  [+] Tarkennus: vaihdettu matchiin #${i + 1}.`, 'green'));
+              break;
+            }
+          }
+          if (!found) console.log(color('  [-] Tarkennus epaonnistui, kaytetaan nykyista.', 'gray'));
         }
       }
     }
