@@ -190,7 +190,6 @@ async function runAutoAnswer() {
   const name = (await ask('  Botin nimi: ') || 'JZBot').trim();
   let mode = (await ask('  Mode (1 = RAGE all correct, 2 = non-suspicious): ')).trim();
   if (mode !== '1') mode = '2';
-  const link = (await ask('  Quiz link/UUID (valinnainen, Enter ohittaa): ') || '').trim();
   const pin = (await ask('  Kahoot PIN: ') || '').trim();
 
   closePrompts();
@@ -204,17 +203,6 @@ async function runAutoAnswer() {
 
   let answerKey = null;
   let quizUuid = null;
-
-  if (link) {
-    const m = link.match(/[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}/i);
-    if (m) {
-      quizUuid = m[0];
-      fetchAnswers(quizUuid).then(k => {
-        const ok = k && (!client.quiz || !Array.isArray(client.quiz.quizQuestionAnswers) || k.length === client.quiz.quizQuestionAnswers.length);
-        if (ok) { answerKey = k; console.log(color(`  [+] Vastaukset ladattu linkista (${k.length} kysymysta)`, 'green')); }
-      }).catch(() => {});
-    }
-  }
 
   const client = new Kahoot();
   registerClient(client);
@@ -275,7 +263,13 @@ async function runAutoAnswer() {
     else if (client.quiz && Array.isArray(client.quiz.quizQuestionAnswers)) choiceCount = client.quiz.quizQuestionAnswers[qi] || choiceCount;
     else if (Array.isArray(question.quizQuestionAnswers)) choiceCount = question.quizQuestionAnswers[qi] || choiceCount;
 
-    const { answerToSend, know, wrong } = computeAnswer(qData, mode, choiceCount);
+    const qData = (Array.isArray(answerKey) ? answerKey[qi] : null);
+    if (!qData && Array.isArray(question.choices) && question.choices.some(c => c && c.correct)) {
+      // Kahoot vuosi oikeat vastaukset kysymyksen mukana
+      answerKey = [question];
+    }
+    const qData2 = (Array.isArray(answerKey) ? answerKey[qi] : null);
+    const { answerToSend, know, wrong } = computeAnswer(qData2, mode, choiceCount);
     if (wrong) console.log(color('  [*] Legit: tahallinen virhe', 'gray'));
     else if (know) console.log(color('  [*] Vastataan oikein', 'gray'));
     else console.log(color('  [*] Vastausta ei tiedeta, arvataan', 'gray'));
@@ -287,8 +281,8 @@ async function runAutoAnswer() {
     // peili-päivitys
     try {
       mirrorState.status = 'question';
-      mirrorState.question = (qData && (qData.question || qData.title)) || `Kysymys ${qi + 1}`;
-      mirrorState.choices = Array.isArray(qData && qData.choices) ? qData.choices.map(c => c.answer || '') : Array.from({length: choiceCount}, (_,i)=>`Vaihtoehto ${i}`);
+      mirrorState.question = (qData2 && (qData2.question || qData2.title)) || `Kysymys ${qi + 1}`;
+      mirrorState.choices = Array.isArray(qData2 && qData2.choices) ? qData2.choices.map(c => c.answer || '') : Array.from({length: choiceCount}, (_,i)=>`Vaihtoehto ${i}`);
       mirrorState.selected = null;
       mirrorState.questionIndex = qi;
     } catch (e) {}
