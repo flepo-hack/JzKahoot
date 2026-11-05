@@ -1,11 +1,10 @@
 {
   "name": "jzkahoot",
-  "version": "2.0.0",
-  "description": "JZ Kahoot Bot for Termux - Smart Version",
+  "version": "3.0.0",
+  "description": "JZ Kahoot Bot for Termux - Auto Answer + Flooder (fully working)",
   "main": "jzkahoot.js",
   "dependencies": {
-    "kahoot.js-updated": "^2.5.0",
-    "readline-sync": "^1.4.10",
+    "kahoot.js-latest": "^1.0.9",
     "axios": "^1.6.0"
   }
 }
