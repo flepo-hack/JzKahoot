@@ -326,8 +326,8 @@ function startMirror(port) {
 async function runAutoAnswer() {
   console.log(color('  [ AUTO ANSWER BOT ]', 'bold'));
   const name = (await ask('  Botin nimi: ') || 'JZBot').trim();
-  let mode = (await ask('  Mode (1=RAGE, 2=non-suspicious, 3=GHOST 100% private): ')).trim();
-  if (mode !== '1' && mode !== '2' && mode !== '3') mode = '2';
+  let mode = (await ask('  Mode (1=RAGE, 2=non-suspicious): ')).trim();
+  if (mode !== '1' && mode !== '2') mode = '2';
   const pin = (await ask('  Kahoot PIN: ') || '').trim();
 
   closePrompts();
@@ -347,35 +347,6 @@ async function runAutoAnswer() {
 
   const client = new Kahoot();
   registerClient(client);
-
-  // GHOST-tila: 4 apubottia painavat eri vastauksia -> 100% oikein private-peleissa
-  const ghosts = [];
-  const ghostResults = {}; // qi -> [bool|null,...]
-  let ghostQIndex = 0;
-  if (mode === '3') {
-    const Kahoot = require('kahoot.js-latest');
-    for (let g = 0; g < 4; g++) {
-      const gname = 'G' + (g + 1) + Math.floor(Math.random() * 1000) + '\u200B';
-      const gc = new Kahoot();
-      registerClient(gc);
-      const gIndex = g;
-      gc.on('QuestionStart', (question) => {
-        const qi = (typeof question.questionIndex === 'number') ? question.questionIndex : 0;
-        ghostQIndex = qi;
-        if (!ghostResults[qi]) ghostResults[qi] = [null, null, null, null];
-        setTimeout(() => {
-          try { question.answer(gIndex); } catch (e) { try { gc.answer(gIndex); } catch (e2) {} }
-        }, 50 + Math.floor(Math.random() * 100));
-      });
-      gc.on('QuestionEnd', (qe) => {
-        const key = ghostQIndex;
-        if (!ghostResults[key]) ghostResults[key] = [null, null, null, null];
-        ghostResults[key][gIndex] = !!qe.isCorrect;
-      });
-      ghosts.push(gc);
-      gc.join(pin, gname).catch(() => {});
-    }
-  }
 
   // challenge-tilassa...
   try {
@@ -443,29 +414,8 @@ async function runAutoAnswer() {
     let answerToSend;
     let know = false;
     let wrong = false;
-    if (mode === '3' && !qData2) {
-      // GHOST: odotetaan apubottien tuloksia -> 100% oikea indeksi
-      console.log(color('  [*] Ghost: odotetaan apubottien tuloksia...', 'gray'));
-      const start = Date.now();
-      while (Date.now() - start < 1500) {
-        const res = ghostResults[qi];
-        if (res && res.some(r => r === true)) {
-          answerToSend = res.findIndex(r => r === true);
-          know = true;
-          break;
-        }
-        await sleep(0.05);
-      }
-      if (answerToSend === undefined) {
-        const r = computeAnswer(qData2, mode, choiceCount);
-        answerToSend = r.answerToSend; know = r.know; wrong = r.wrong;
-      } else {
-        console.log(color('  [*] Ghost: oikea vastaus loytyi (' + answerToSend + ')', 'green'));
-      }
-    } else {
-      const r = computeAnswer(qData2, mode, choiceCount);
-      answerToSend = r.answerToSend; know = r.know; wrong = r.wrong;
-    }
+    const r = computeAnswer(qData2, mode, choiceCount);
+    answerToSend = r.answerToSend; know = r.know; wrong = r.wrong;
     if (wrong) console.log(color('  [*] Legit: tahallinen virhe', 'gray'));
     else if (know) console.log(color('  [*] Vastataan oikein', 'gray'));
     else console.log(color('  [*] Vastausta ei tiedeta, arvataan', 'gray'));
@@ -711,7 +661,7 @@ async function main() {
   banner();
   console.log(color('  Valitse toiminto:', 'bold'));
   let choice = '';
-  while (choice !== '1' && choice !== '2' && choice !== '3') {
+  while (choice !== '1' && choice !== '2') {
     console.log(color('  1 = Auto Answer Bot', 'green'));
     console.log(color('  2 = Flooder / Crasher', 'red'));
     console.log(color('  3 = Leaver (botit poistuvat)', 'yellow'));
