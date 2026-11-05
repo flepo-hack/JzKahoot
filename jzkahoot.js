@@ -1,73 +1,132 @@
 const Kahoot = require('kahoot.js-updated');
 const readlineSync = require('readline-sync');
 const readline = require('readline');
+const axios = require('axios');
 
 console.log("=========================================");
-console.log("          JZ KAHOOT BOT                  ");
+console.log("        JZ KAHOOT BOT - V2.0 PRO         ");
 console.log("=========================================");
 
-// 1. Kysytään botin tiedot
-const botName = readlineSync.question('Enter Bot Name: ');
+// 1. Kysytään asetukset käyttäjältä
 const pin = readlineSync.question('Enter Kahoot PIN: ');
+const botNameInput = readlineSync.question('Enter Bot Name: ');
+// Lisätään nimen perään näkymätön merkki kiertämään Kahootin nimiblokkeja
+const botName = botNameInput + '\u200B';
 
-console.log("\n[INFO] Press Capital 'Q' at any time to close the bot.\n");
+console.log("\n[?] Miten haluat botin pelaavan?");
+console.log("1 = RAGE MODE (100% oikein, erittäin nopea)");
+console.log("2 = LEGIT MODE (Inhimilliset viiveet, ~15% tahallisia virheitä välttääkseen potkut)");
+const mode = readlineSync.question('Valitse tila (1 tai 2): ') || '2';
 
-// 2. Laitetaan näppäimistön kuuntelu päälle (Iso Q sulkee)
+console.log("\n[?] (VAPAAEHTOINEN) Saadaksesi 100% oikeat vastaukset, liitä tähän visan linkki tai UUID.");
+console.log("Esimerkki: https://create.kahoot.it/details/123e4567-e89b-12d3-a456-426614174000");
+const quizUrl = readlineSync.question('Linkki/UUID (paina Enter ohittaaksesi): ');
+
+console.log("\n[INFO] Paina Isoa 'Q' milloin tahansa sulkeaksesi botin.\n");
+
+// Näppäimistön kuuntelu (Iso Q sulkee)
 readline.emitKeypressEvents(process.stdin);
-if (process.stdin.isTTY) {
-    process.stdin.setRawMode(true);
-}
+if (process.stdin.isTTY) process.stdin.setRawMode(true);
 process.stdin.on('keypress', (str, key) => {
     if (str === 'Q') {
-        console.log('\n[!] Capital Q pressed. Exiting JZ Kahoot Bot. Goodbye!');
+        console.log('\n[!] Iso Q painettu. Botti suljetaan. Morjes!');
         process.exit(0);
     }
-    if (key.ctrl && key.name === 'c') {
-        process.exit(0);
-    }
+    if (key.ctrl && key.name === 'c') process.exit(0);
 });
 
-const client = new Kahoot();
-let questionCount = 0;
+// Pääohjelma
+async function startBot() {
+    let answerKey = [];
 
-console.log(`[*] Connecting to game ${pin} as ${botName}...`);
-
-// 3. Yhdistetään peliin
-client.join(pin, botName).catch(err => {
-    console.log('[-] Failed to join:', err.description || err);
-    process.exit(1);
-});
-
-client.on('joined', () => {
-    console.log(`[+] Successfully joined the game! Waiting for it to start...`);
-});
-
-// 4. Kysymysten käsittely ja viive-logiikka
-client.on('QuestionStart', (question) => {
-    questionCount++;
-    console.log(`\n[!] Question ${questionCount} started!`);
-
-    let delayMs = 150; // Normaali, erittäin nopea vastausaika
-
-    // Joka 3. kysymys: lisätään inhimillinen viive (2000 - 4000 millisekuntia)
-    if (questionCount % 3 === 0) {
-        delayMs = Math.floor(Math.random() * 2000) + 2000; 
-        console.log(`[*] Adding human delay for this round: ${delayMs}ms`);
+    // Jos linkki/UUID annettiin, ladataan vastaukset Kahootin rajapinnasta
+    if (quizUrl.trim() !== '') {
+        const uuidMatch = quizUrl.match(/[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}/i);
+        if (uuidMatch) {
+            const uuid = uuidMatch[0];
+            console.log(`[*] Etsitään vastauksia visalle: ${uuid}...`);
+            try {
+                const response = await axios.get(`https://create.kahoot.it/rest/kahoots/${uuid}`);
+                answerKey = response.data.questions;
+                console.log(`[+] ONNISTUI! Ladattiin ${answerKey.length} kysymyksen vastaukset.\n`);
+            } catch (error) {
+                console.log(`[-] Virhe ladattaessa vastauksia. Peli on täysin suojattu tai UUID on väärä.`);
+                console.log(`[-] Botti siirtyy arvaustilaan.\n`);
+            }
+        } else {
+            console.log("[-] Virheellinen linkki tai UUID. Botti siirtyy arvaustilaan.\n");
+        }
     } else {
-        console.log(`[*] Answering fast! Delay: ${delayMs}ms`);
+        console.log("[!] Ei linkkiä. Botti joutuu arvaamaan kaikki vastaukset.\n");
     }
 
-    setTimeout(() => {
-        // Valitaan satunnainen vastaus, jotta peli etenee automaattisesti
-        const choiceCount = question.choices ? question.choices.length : 4;
-        const randomAnswer = Math.floor(Math.random() * choiceCount);
-        
-        console.log(`[+] Answering with option ${randomAnswer}`);
-        question.answer(randomAnswer);
-    }, delayMs);
-});
+    const client = new Kahoot();
+    console.log(`[*] Yhdistetään peliin ${pin} nimellä ${botNameInput}...`);
 
-client.on('Disconnect', (reason) => {
-    console.log('\n[-] Disconnected from the game:', reason);
-    process.exit(0);
-});
+    client.join(pin, botName).catch(err => {
+        console.log('[-] Liittyminen epäonnistui:', err.description || err);
+        process.exit(1);
+    });
+
+    client.on('joined', () => {
+        console.log(`[+] Yhteys luotu! Odotetaan pelin alkamista...`);
+    });
+
+    let questionIndex = 0;
+
+    client.on('QuestionStart', (question) => {
+        console.log(`\n[!] Kysymys ${questionIndex + 1} alkoi!`);
+        
+        let choiceCount = question.choices ? question.choices.length : 4;
+        let finalAnswerIndex = Math.floor(Math.random() * choiceCount); // Oletuksena arvaus
+        let knowAnswer = false;
+
+        // Etsitään oikea vastaus, jos data ladattiin onnistuneesti
+        if (answerKey[questionIndex]) {
+            const choicesData = answerKey[questionIndex].choices;
+            if (choicesData) {
+                finalAnswerIndex = choicesData.findIndex(c => c.correct === true);
+                knowAnswer = true;
+            }
+        }
+
+        let delayMs = 500; // Default
+
+        if (mode === '1') {
+            // RAGE MODE: Nopein turvallinen viive (300-800ms) ettei Kahoot heitä ulos bottina
+            delayMs = Math.floor(Math.random() * 500) + 300;
+            console.log(`[*] Rage mode päällä. Isketään oikea vastaus tauluun!`);
+        } else {
+            // LEGIT MODE: Inhimillinen viive (2s - 5s)
+            delayMs = Math.floor(Math.random() * 3000) + 2000;
+            
+            // 15 % mahdollisuus tahalliseen virheeseen vain uskottavuuden vuoksi
+            if (knowAnswer && Math.random() < 0.15) {
+                console.log(`[*] Legit mode: Tehdään tahallinen virhe, ettei opettaja huomaa...`);
+                let wrongAnswers = [0, 1, 2, 3].filter(a => a !== finalAnswerIndex && a < choiceCount);
+                finalAnswerIndex = wrongAnswers[Math.floor(Math.random() * wrongAnswers.length)];
+            } else if (knowAnswer) {
+                console.log(`[*] Legit mode: Vastataan oikein inhimillisellä viiveellä.`);
+            }
+        }
+
+        if (!knowAnswer) {
+            console.log(`[*] Vastausta ei tiedetä. Arvataan vaihtoehto ${finalAnswerIndex}.`);
+        }
+
+        setTimeout(() => {
+            console.log(`[+] Lähetettiin vastaus: ${finalAnswerIndex} (Viive: ${delayMs}ms)`);
+            question.answer(finalAnswerIndex);
+        }, delayMs);
+
+        questionIndex++;
+    });
+
+    client.on('Disconnect', (reason) => {
+        console.log('\n[-] Yhteys peliin katkesi:', reason);
+        process.exit(0);
+    });
+}
+
+startBot();
+            
