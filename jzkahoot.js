@@ -161,14 +161,8 @@ function computeAnswer(qData, mode, choiceCount) {
 }
 
 function banner() {
-  try { console.clear(); } catch (e) {}
-  console.log(color('  ██╗ ███████╗   ██╗  ██╗ █████╗ ██╗  ██╗  ██████╗  ██████╗  ████████╗', 'cyan'));
-  console.log(color('  ██║ ╚══███╔╝   ██║  ██║██╔══██╗██║  ██║ ██╔═══██╗██╔═══██╗╚══██╔══╝', 'cyan'));
-  console.log(color('  ██║   ███╔╝    ███████║███████║███████║ ██║   ██║██║   ██║   ██║   ', 'cyan'));
-  console.log(color('  ██║  ███╔╝     ██╔══██║██╔══██║██╔══██║ ██║   ██║██║   ██║   ██║   ', 'cyan'));
-  console.log(color('  ██║ ███████╗   ██║  ██║██║  ██║██║  ██║ ╚██████╔╝╚██████╔╝   ██║   ', 'cyan'));
-  console.log(color('  ╚═╝ ╚══════╝   ╚═╝  ╚═╝╚═╝  ╚═╝╚═╝  ╚═╝  ╚═════╝  ╚═════╝    ╚═╝   ', 'cyan'));
-  console.log(color('        JZ KAHOOT BOT  -  V3.3  -  TERMUX', 'magenta'));
+  try { if (process.stdout.isTTY) console.clear(); } catch (e) {}
+  console.log(color('  JZ KAHOOT BOT  -  V3.4  -  TERMUX', 'cyan'));
   console.log(color('  Auto Answer + Flooder + Leaver  |  Shift+Q = stop', 'gray'));
   console.log('');
 }
@@ -183,12 +177,27 @@ function startMirror(port) {
     else if (req.url === '/state') { res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' }); res.end(JSON.stringify(mirrorState)); }
     else { res.writeHead(404); res.end(); }
   });
-  srv.listen(port, () => {
-    const url = `http://localhost:${port}`;
-    console.log(color(`  [UI] Peili (avaa Chromessa): ${url}`, 'cyan'));
-    try { require('child_process').exec('termux-open-url ' + url); } catch (e) {}
+function startMirror(port) {
+  port = port || 8080;
+  const html = `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>JZ Kahoot Peili</title><style>body{font-family:system-ui,Arial;background:#0b0f1a;color:#e6e6e6;margin:0;padding:12px}h1{color:#00e5ff;font-size:18px;margin:0 0 8px}.card{background:#151b2e;border:1px solid #2a3355;border-radius:10px;padding:12px;margin:8px 0}.q{font-size:16px;font-weight:700;margin:6px 0}.choice{padding:8px 10px;margin:4px 0;border-radius:8px;background:#1f2742;border:1px solid #334}.sel{background:#00c853;border-color:#00e676;color:#000;font-weight:700}.correct{background:#2962ff;border-color:#448aff;color:#fff;font-weight:700}.meta{color:#9aa;font-size:12px}.status{color:#ffab00}</style></head><body><h1>JZ Kahoot Peili</h1><div class="meta">Tila: <span id="status" class="status">-</span> | Mode: <span id="mode">-</span> | PIN: <span id="pin">-</span></div><div class="card"><div class="q" id="q">Odotetaan...</div><div id="choices"></div></div><div class="meta" id="sel">Valittu: -</div><div class="meta" id="corr">Oikeat: -</div><script>async function tick(){try{const r=await fetch('/state');const d=await r.json();document.getElementById('status').textContent=d.status;document.getElementById('mode').textContent=d.mode;document.getElementById('pin').textContent=d.pin;document.getElementById('q').textContent=d.question||'Odotetaan...';const c=document.getElementById('choices');c.innerHTML='';(d.choices||[]).forEach((x,i)=>{let cls='choice';if(Array.isArray(d.selected)&&d.selected.includes(i))cls+=' sel';else if(d.selected===i)cls+=' sel';if(Array.isArray(d.correct)&&d.correct.includes(i))cls+=' correct';const div=document.createElement('div');div.className=cls;div.textContent=i+': '+x; c.appendChild(div);});document.getElementById('sel').textContent='Valittu: '+(Array.isArray(d.selected)?d.selected.join(','):(d.selected===null?'-':d.selected));document.getElementById('corr').textContent='Oikeat: '+(Array.isArray(d.correct)?d.correct.join(','):(d.correct===null?'-':d.correct));}catch(e){}}setInterval(tick,500);tick();</script></body></html>`;
+  const srv = http.createServer((req, res) => {
+    if (req.url === '/') { res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' }); res.end(html); }
+    else if (req.url === '/state') { res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' }); res.end(JSON.stringify(mirrorState)); }
+    else { res.writeHead(404); res.end(); }
   });
+  function tryListen(p) {
+    srv.listen(p, () => {
+      const url = `http://localhost:${p}`;
+      console.log(color(`  [UI] Peili (avaa Chromessa): ${url}`, 'cyan'));
+      try { require('child_process').exec('termux-open-url ' + url); } catch (e) {}
+    });
+    srv.on('error', (e) => {
+      if (e.code === 'EADDRINUSE') tryListen(p + 1);
+    });
+  }
+  tryListen(port);
   return srv;
+}
 }
 
 // ---------- Auto Answer ----------
@@ -438,18 +447,60 @@ async function runLeaver() {
 }
 
 // ---------- Main ----------
+async function runSelfTest() {
+  console.log(color('  [ SELF-TEST ]', 'bold'));
+  const mockKey = [
+    { type: 'quiz', question: 'Paa', choices: [{ answer: 'a', correct: false }, { answer: 'b', correct: true }] },
+    { type: 'multiple_select_quiz', question: 'Par', choices: [{ answer: '2', correct: true }, { answer: '3', correct: false }, { answer: '4', correct: true }] },
+    { type: 'open_ended', question: '2+2', choices: [{ answer: '4', correct: true }] },
+    { type: 'jumble', question: 'Jar', choices: [{ answer: 'A' }, { answer: 'B' }] }
+  ];
+  for (const mode of ['1', '2']) {
+    console.log(color(`  Mode ${mode}`, 'cyan'));
+    for (let qi = 0; qi < mockKey.length; qi++) {
+      const qData = mockKey[qi];
+      const choiceCount = Array.isArray(qData.choices) ? qData.choices.length : 4;
+      const { answerToSend, know, wrong } = computeAnswer(qData, mode, choiceCount);
+      console.log(`    Q${qi + 1} ${qData.type}: ${Array.isArray(answerToSend) ? answerToSend.join(',') : answerToSend} ${know ? (wrong ? '(tahallinen virhe)' : '(oikein)') : '(arvaus)'}`);
+    }
+  }
+  // simulate QuestionEnd collection
+  const answerKey = [];
+  const qe = { type: 'quiz', correctChoices: [1] };
+  const idx = 0;
+  const q = answerKey[idx] || { type: qe.type, choices: [] };
+  if (!Array.isArray(q.choices)) q.choices = [];
+  const n = Math.max(q.choices.length, 2);
+  while (q.choices.length < n) q.choices.push({ answer: '', correct: false });
+  qe.correctChoices.forEach(i => { if (q.choices[i]) q.choices[i].correct = true; });
+  answerKey[idx] = q;
+  const { answerToSend } = computeAnswer(answerKey[0], '1', 2);
+  console.log(color(`  Collection test: ${answerToSend} (odotettu 1)`, answerToSend === 1 ? 'green' : 'red'));
+  console.log(color('  Self-test valmis.', 'green'));
+}
+
 async function main() {
+  if (process.argv.includes('--test')) {
+    banner();
+    await runSelfTest();
+    process.exit(0);
+  }
   banner();
   console.log(color('  Valitse toiminto:', 'bold'));
-  console.log(color('  1 = Auto Answer Bot', 'green'));
-  console.log(color('  2 = Flooder / Crasher', 'red'));
-  console.log(color('  3 = Leaver (botit poistuvat)', 'yellow'));
-  console.log('');
-  const c = (await ask('  Valinta (1/2/3): ')).trim();
-  if (c === '1') await runAutoAnswer();
-  else if (c === '2') await runFlooder();
-  else if (c === '3') await runLeaver();
-  else { console.log(color('  Virheellinen valinta.', 'red')); process.exit(0); }
+  let choice = '';
+  while (choice !== '1' && choice !== '2' && choice !== '3') {
+    console.log(color('  1 = Auto Answer Bot', 'green'));
+    console.log(color('  2 = Flooder / Crasher', 'red'));
+    console.log(color('  3 = Leaver (botit poistuvat)', 'yellow'));
+    console.log('');
+    choice = (await ask('  Valinta (1/2/3): ')).trim();
+    if (choice !== '1' && choice !== '2' && choice !== '3') {
+      console.log(color('  Virheellinen valinta, yrita uudelleen.', 'red'));
+    }
+  }
+  if (choice === '1') await runAutoAnswer();
+  else if (choice === '2') await runFlooder();
+  else if (choice === '3') await runLeaver();
 
   setInterval(() => {}, 60000);
 }
