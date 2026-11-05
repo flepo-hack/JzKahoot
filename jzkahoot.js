@@ -138,13 +138,20 @@ async function runAutoAnswer() {
     if (m) {
       quizUuid = m[0];
       fetchAnswers(quizUuid).then(k => {
-        if (k) { answerKey = k; console.log(color(`  [+] Vastaukset ladattu linkista (${k.length} kysymysta)`, 'green')); }
+        const ok = k && (!client.quiz || !Array.isArray(client.quiz.quizQuestionAnswers) || k.length === client.quiz.quizQuestionAnswers.length);
+        if (ok) { answerKey = k; console.log(color(`  [+] Vastaukset ladattu linkista (${k.length} kysymysta)`, 'green')); }
       }).catch(() => {});
     }
   }
 
   const client = new Kahoot();
   registerClient(client);
+
+  // challenge-tilassa odotetaan meidän vastausta (ei auto-null) ja jatketaan oikein
+  try {
+    client.defaults.options.ChallengeWaitForInput = true;
+    client.defaults.options.ChallengeAutoContinue = true;
+  } catch (e) {}
 
   const origMessage = client._message.bind(client);
   client._message = function (msg) {
@@ -157,7 +164,8 @@ async function runAutoAnswer() {
           if (!quizUuid) {
             quizUuid = u;
             fetchAnswers(u).then(k => {
-              if (k) { answerKey = k; console.log(color(`  [+] Nuuskittiin UUID (${u}) - vastaukset ladattu (${k.length})`, 'green')); }
+              const ok = k && (!client.quiz || !Array.isArray(client.quiz.quizQuestionAnswers) || k.length === client.quiz.quizQuestionAnswers.length);
+              if (ok) { answerKey = k; console.log(color(`  [+] Nuuskittiin UUID (${u}) - vastaukset ladattu (${k.length})`, 'green')); }
             }).catch(() => {});
           }
         }
@@ -194,16 +202,21 @@ async function runAutoAnswer() {
     else if (Array.isArray(question.quizQuestionAnswers)) choiceCount = question.quizQuestionAnswers[qi] || choiceCount;
 
     let know = false;
-    let correctIndex = null;
-    let correctIndices = null;
+    let correctAnswer = null;
     const qData = (Array.isArray(answerKey) ? answerKey[qi] : null);
-    if (qData && Array.isArray(qData.choices)) {
-      const idxs = [];
-      qData.choices.forEach((c, i) => { if (c.correct) idxs.push(i); });
-      if (idxs.length > 0) {
-        know = true;
-        if (idxs.length === 1) correctIndex = idxs[0];
-        else correctIndices = idxs;
+    const qType = qData ? (qData.type || question.gameBlockType || '') : (question.gameBlockType || '');
+    if (qData) {
+      if (qType === 'open_ended' || qType === 'word_cloud') {
+        const c = (Array.isArray(qData.choices) ? (qData.choices.find(x => x.correct) || qData.choices[0]) : null);
+        if (c) { know = true; correctAnswer = c.answer; }
+      } else if (qType === 'jumble') {
+        know = true; correctAnswer = [0, 1, 2, 3];
+      } else if (Array.isArray(qData.choices)) {
+        const idxs = qData.choices.map((c, i) => (c && c.correct) ? i : -1).filter(i => i >= 0);
+        if (idxs.length > 0) {
+          know = true;
+          correctAnswer = (qType === 'multiple_select_quiz') ? idxs : idxs[0];
+        }
       }
     }
 
@@ -213,21 +226,18 @@ async function runAutoAnswer() {
 
     let answerToSend;
     if (know) {
-      if (mode === '2' && Math.random() < 0.1) {
-        const wrong = [];
-        for (let i = 0; i < choiceCount; i++) {
-          if (correctIndex !== null && i !== correctIndex) wrong.push(i);
-          if (correctIndices && !correctIndices.includes(i)) wrong.push(i);
+      if (mode === '2' && qType === 'quiz' && Math.random() < 0.1) {
+        answerToSend = Math.floor(Math.random() * choiceCount);
+        if (typeof correctAnswer === 'number' && answerToSend === correctAnswer && choiceCount > 1) {
+          answerToSend = (correctAnswer + 1) % choiceCount;
         }
-        const uniq = [...new Set(wrong)];
-        answerToSend = uniq.length ? uniq[Math.floor(Math.random() * uniq.length)] : Math.floor(Math.random() * choiceCount);
         console.log(color('  [*] Legit: tahallinen virhe', 'gray'));
       } else {
-        answerToSend = (correctIndices && correctIndices.length > 1) ? correctIndices : correctIndex;
+        answerToSend = correctAnswer;
         console.log(color('  [*] Vastataan oikein', 'gray'));
       }
     } else {
-      answerToSend = Math.floor(Math.random() * choiceCount);
+      answerToSend = (qType === 'jumble') ? [0, 1, 2, 3] : Math.floor(Math.random() * choiceCount);
       console.log(color('  [*] Vastausta ei tiedeta, arvataan', 'gray'));
     }
 
@@ -243,6 +253,7 @@ async function runAutoAnswer() {
   });
 
   client.on('QuizEnd', () => { console.log(color('  [+] Peli paattyi.', 'cyan')); });
+  client.on('TwoFactorReset', () => { console.log(color('  [!] 2FA vaaditaan (hostin koodi) - botti ei voi vastata automaattisesti', 'yellow')); });
   client.on('Disconnect', (reason) => { console.log(color('  [-] Katkesi: ' + reason, 'red')); process.exit(0); });
 
   console.log(color(`  [*] Yhdistetaan peliin ${pin} nimella ${name}...`, 'cyan'));
@@ -266,6 +277,7 @@ async function runFlooder() {
   console.log(color(`  [*] Lahetetaan ${count} bottia peliin ${pin}...`, 'cyan'));
 
   let joined = 0, failed = 0;
+  const tasks = [];
   for (let i = 1; i <= count; i++) {
     const name = `${base}${i}\u200B`;
     try {
@@ -273,7 +285,7 @@ async function runFlooder() {
       const client = res.client;
       const event = res.event;
       registerClient(client);
-      event.then(() => {
+      const p = event.then(() => {
         joined++;
         console.log(color(`  [+] Bot ${i} liittyi (${joined}/${count})`, 'green'));
       }).catch((e) => {
@@ -281,6 +293,7 @@ async function runFlooder() {
         console.log(color(`  [-] Bot ${i} epaonnistui: ${e && e.description || e}`, 'red'));
         try { client.leave(); } catch (x) {}
       });
+      tasks.push(p);
       client.on('Disconnect', (r) => {});
     } catch (e) {
       failed++;
@@ -289,6 +302,7 @@ async function runFlooder() {
     await sleep(0.15);
   }
 
+  await Promise.allSettled(tasks);
   console.log(color(`  [*] Kaikki ${count} lahetetty. Liittyneet: ${joined}, epaonnistuneet: ${failed}`, 'cyan'));
   console.log(color('  [*] Paina Iso Q lopettaaksesi.', 'gray'));
 }
