@@ -166,6 +166,41 @@ function openAIAnswer(apiKey, model, questionText, choices) {
   });
 }
 
+async function findPublicMatch(questionCount, firstChoiceCount, firstCorrect, firstQuestionText) {
+  // Sormenjälkihaku: etsi julkinen quiz, jolla sama kysymysmäärä ja ensimmäinen kysymys
+  let query = '';
+  if (firstQuestionText) {
+    query = String(firstQuestionText).trim().split(/\s+/).slice(0, 6).join(' ');
+  }
+  const url = 'https://create.kahoot.it/rest/kahoots/?query=' + encodeURIComponent(query) + '&limit=25&orderBy=relevance';
+  try {
+    const data = await httpGetJson(url, 8000);
+    const entities = (data && data.entities) ? data.entities : [];
+    for (const ent of entities) {
+      const uuid = ent.card && ent.card.uuid;
+      if (!uuid) continue;
+      const quiz = await fetchAnswers(uuid);
+      if (!quiz || !Array.isArray(quiz) || quiz.length !== questionCount) continue;
+      const q0 = quiz[0];
+      if (!q0 || !Array.isArray(q0.choices)) continue;
+      if (q0.choices.length !== firstChoiceCount) continue;
+      // tarkista oikea vastaus
+      const idxs = q0.choices.map((c, i) => (c && c.correct) ? i : -1).filter(i => i >= 0);
+      if (idxs.length === 0) continue;
+      const correct = (idxs.length === 1) ? idxs[0] : idxs;
+      // vertaa
+      let match = false;
+      if (Array.isArray(correct) && Array.isArray(firstCorrect)) {
+        match = JSON.stringify(correct) === JSON.stringify(firstCorrect);
+      } else {
+        match = correct === firstCorrect;
+      }
+      if (match) return quiz;
+    }
+  } catch (e) {}
+  return null;
+}
+
 function computeAnswer(qData, mode, choiceCount) {
   const qType = qData ? (qData.type || '') : '';
   let know = false;
@@ -268,6 +303,7 @@ async function runAutoAnswer() {
 
   let answerKey = null;
   let quizUuid = null;
+  let firstQuestionText = null;
 
   const client = new Kahoot();
   registerClient(client);
@@ -350,7 +386,8 @@ async function runAutoAnswer() {
   client.on('QuestionStart', async (question) => {
     const qi = (typeof question.questionIndex === 'number') ? question.questionIndex : qIndex;
     qIndex = qi;
-    console.log(color(`\n  [!] Kysymys ${qi + 1} alkoi`, 'yellow'));
+    if (qi === 0) firstQuestionText = question.title || question.question || question.text || firstQuestionText;
+    console.log(color(`\\n  [!] Kysymys ${qi + 1} alkoi`, 'yellow'));
 
     let choiceCount = 4;
     if (Array.isArray(question.choices)) choiceCount = question.choices.length;
@@ -429,7 +466,7 @@ async function runAutoAnswer() {
     }, delay);
   });
 
-  client.on('QuestionEnd', (qe) => {
+  client.on('QuestionEnd', async (qe) => {
     mirrorState.status = 'questionEnd';
     const idx = Math.max(0, qIndex - 1);
     const correct = Array.isArray(qe.correctChoices) ? qe.correctChoices : null;
@@ -443,6 +480,21 @@ async function runAutoAnswer() {
       while (q.choices.length < n) q.choices.push({ answer: '', correct: false });
       correct.forEach(i => { if (q.choices[i]) q.choices[i].correct = true; });
       answerKey[idx] = q;
+
+      // Sormenjälkihaku julkisista pohjista (vain ensimmäisen kysymyksen jälkeen)
+      if (idx === 0 && (!answerKey || answerKey.length < (client.quiz && client.quiz.quizQuestionAnswers ? client.quiz.quizQuestionAnswers.length : 999))) {
+        const qCount = (client.quiz && Array.isArray(client.quiz.quizQuestionAnswers)) ? client.quiz.quizQuestionAnswers.length : (answerKey.length);
+        const firstChoiceCount = (mirrorState.choices && mirrorState.choices.length) || correct.reduce((a,b)=>Math.max(a,b+1),0);
+        const firstCorrect = (correct.length === 1) ? correct[0] : correct;
+        console.log(color('  [*] Sormenjälkihaku julkisista pohjista...', 'gray'));
+        const match = await findPublicMatch(qCount, firstChoiceCount, firstCorrect, firstQuestionText);
+        if (match) {
+          answerKey = match;
+          console.log(color(`  [+] Julkinen pohja loytyi! Ladattu ${match.length} kysymyksen vastaukset.`, 'green'));
+        } else {
+          console.log(color('  [-] Julkista pohjaa ei loytynyt (private quiz).', 'gray'));
+        }
+      }
     }
   });
   client.on('QuizEnd', () => { mirrorState.status = 'ended'; console.log(color('  [+] Peli paattyi.', 'cyan')); });
