@@ -121,6 +121,51 @@ function httpGetJson(url, timeout) {
   });
 }
 
+function openAIAnswer(apiKey, model, questionText, choices) {
+  return new Promise((resolve) => {
+    const body = JSON.stringify({
+      model: model || 'gpt-4o-mini',
+      messages: [
+        { role: 'system', content: 'You answer multiple-choice quiz questions. Reply with only the 0-based index of the correct option. For multiple correct, return comma-separated indices.' },
+        { role: 'user', content: `Question: ${questionText}\nOptions:\n${choices.map((c, i) => i + ': ' + c).join('\n')}` }
+      ],
+      temperature: 0,
+      max_tokens: 20
+    });
+    const req = https.request({
+      hostname: 'api.openai.com',
+      path: '/v1/chat/completions',
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': 'Bearer ' + apiKey,
+        'Content-Length': Buffer.byteLength(body)
+      },
+      timeout: 8000
+    }, (res) => {
+      let data = '';
+      res.on('data', c => data += c);
+      res.on('end', () => {
+        try {
+          const j = JSON.parse(data);
+          const txt = (j.choices && j.choices[0] && j.choices[0].message && j.choices[0].message.content) || '';
+          const nums = txt.match(/\d+/g);
+          if (nums && nums.length) {
+            const idxs = nums.map(n => parseInt(n, 10)).filter(n => n >= 0 && n < choices.length);
+            if (idxs.length === 1) resolve(idxs[0]);
+            else if (idxs.length > 1) resolve(idxs);
+            else resolve(null);
+          } else resolve(null);
+        } catch (e) { resolve(null); }
+      });
+    });
+    req.on('error', () => resolve(null));
+    req.on('timeout', () => { req.destroy(); resolve(null); });
+    req.write(body);
+    req.end();
+  });
+}
+
 function computeAnswer(qData, mode, choiceCount) {
   const qType = qData ? (qData.type || '') : '';
   let know = false;
@@ -208,6 +253,8 @@ async function runAutoAnswer() {
   const name = (await ask('  Botin nimi: ') || 'JZBot').trim();
   let mode = (await ask('  Mode (1=RAGE, 2=non-suspicious, 3=GHOST 100% private): ')).trim();
   if (mode !== '1' && mode !== '2' && mode !== '3') mode = '2';
+  const apiKey = (await ask('  OpenAI API key (valinnainen, private-peleihin): ') || '').trim();
+  const apiModel = (await ask('  OpenAI model (Enter = gpt-4o-mini): ') || 'gpt-4o-mini').trim();
   const pin = (await ask('  Kahoot PIN: ') || '').trim();
 
   closePrompts();
@@ -337,6 +384,16 @@ async function runAutoAnswer() {
         answerToSend = r.answerToSend; know = r.know; wrong = r.wrong;
       } else {
         console.log(color('  [*] Ghost: oikea vastaus loytyi (' + answerToSend + ')', 'green'));
+      }
+    } else if (apiKey && !qData2) {
+      const qText = (question && (question.title || question.question)) || `Kysymys ${qi + 1}`;
+      const opts = Array.from({length: choiceCount}, (_, i) => `Vaihtoehto ${i}`);
+      console.log(color('  [*] AI: kysytaan OpenAI:lta...', 'gray'));
+      const ai = await openAIAnswer(apiKey, apiModel, qText, opts);
+      if (ai !== null) { answerToSend = ai; know = true; console.log(color('  [*] AI: vastaus ' + ai, 'green')); }
+      else {
+        const r = computeAnswer(qData2, mode, choiceCount);
+        answerToSend = r.answerToSend; know = r.know; wrong = r.wrong;
       }
     } else {
       const r = computeAnswer(qData2, mode, choiceCount);
