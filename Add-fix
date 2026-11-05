@@ -1,0 +1,9 @@
+// Kuunnellaan kaikkea raakadataa mitä Kahootin palvelin lähettää
+client.on('message', (message) => {
+    // Jos palvelin vuotaa vahingossa "quizId" tai "uuid" datan joukossa
+    if (message.data && message.data.quizId) {
+        const sniffedUUID = message.data.quizId;
+        console.log(`[!] BINGO! Nuuskittiin UUID lennosta: ${sniffedUUID}`);
+        // Tässä kohtaa koodi tekee automaattisesti axios.get() haun ja lataa oikeat vastaukset!
+    }
+});
