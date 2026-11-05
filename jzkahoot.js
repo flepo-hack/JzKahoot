@@ -161,8 +161,15 @@ function computeAnswer(qData, mode, choiceCount) {
 }
 
 function banner() {
-  console.log(color('  JZ KAHOOT BOT  -  V3.2  -  TERMUX', 'cyan'));
-  console.log(color('  Auto Answer + Flooder  |  Shift+Q = stop', 'gray'));
+  try { console.clear(); } catch (e) {}
+  console.log(color('  ██╗ ███████╗   ██╗  ██╗ █████╗ ██╗  ██╗  ██████╗  ██████╗  ████████╗', 'cyan'));
+  console.log(color('  ██║ ╚══███╔╝   ██║  ██║██╔══██╗██║  ██║ ██╔═══██╗██╔═══██╗╚══██╔══╝', 'cyan'));
+  console.log(color('  ██║   ███╔╝    ███████║███████║███████║ ██║   ██║██║   ██║   ██║   ', 'cyan'));
+  console.log(color('  ██║  ███╔╝     ██╔══██║██╔══██║██╔══██║ ██║   ██║██║   ██║   ██║   ', 'cyan'));
+  console.log(color('  ██║ ███████╗   ██║  ██║██║  ██║██║  ██║ ╚██████╔╝╚██████╔╝   ██║   ', 'cyan'));
+  console.log(color('  ╚═╝ ╚══════╝   ╚═╝  ╚═╝╚═╝  ╚═╝╚═╝  ╚═╝  ╚═════╝  ╚═════╝    ╚═╝   ', 'cyan'));
+  console.log(color('        JZ KAHOOT BOT  -  V3.3  -  TERMUX', 'magenta'));
+  console.log(color('  Auto Answer + Flooder + Leaver  |  Shift+Q = stop', 'gray'));
   console.log('');
 }
 
@@ -170,7 +177,7 @@ function banner() {
 const mirrorState = { status: 'idle', mode: '', pin: '', question: '', choices: [], selected: null, correct: null, qi: 0, bots: 0, joined: 0 };
 function startMirror(port) {
   port = port || 8080;
-  const html = `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>JZ Kahoot Peili</title><style>body{font-family:system-ui,Arial;background:#0b0f1a;color:#e6e6e6;margin:0;padding:12px}h1{color:#00e5ff;font-size:18px;margin:0 0 8px}.card{background:#151b2e;border:1px solid #2a3355;border-radius:10px;padding:12px;margin:8px 0}.q{font-size:16px;font-weight:700;margin:6px 0}.choice{padding:8px 10px;margin:4px 0;border-radius:8px;background:#1f2742;border:1px solid #334}.sel{background:#00c853;border-color:#00e676;color:#000;font-weight:700}.meta{color:#9aa;font-size:12px}.status{color:#ffab00}</style></head><body><h1>JZ Kahoot Peili</h1><div class="meta">Tila: <span id="status" class="status">-</span> | Mode: <span id="mode">-</span> | PIN: <span id="pin">-</span></div><div class="card"><div class="q" id="q">Odotetaan...</div><div id="choices"></div></div><div class="meta" id="sel">Valittu: -</div><script>async function tick(){try{const r=await fetch('/state');const d=await r.json();document.getElementById('status').textContent=d.status;document.getElementById('mode').textContent=d.mode;document.getElementById('pin').textContent=d.pin;document.getElementById('q').textContent=d.question||'Odotetaan...';const c=document.getElementById('choices');c.innerHTML='';(d.choices||[]).forEach((x,i)=>{const div=document.createElement('div');div.className='choice'+(Array.isArray(d.selected)?(d.selected.includes(i)?' sel':''):(d.selected===i?' sel':''));div.textContent=i+': '+x; c.appendChild(div);});document.getElementById('sel').textContent='Valittu: '+(Array.isArray(d.selected)?d.selected.join(','):(d.selected===null?'-':d.selected));}catch(e){}}setInterval(tick,500);tick();</script></body></html>`;
+  const html = `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>JZ Kahoot Peili</title><style>body{font-family:system-ui,Arial;background:#0b0f1a;color:#e6e6e6;margin:0;padding:12px}h1{color:#00e5ff;font-size:18px;margin:0 0 8px}.card{background:#151b2e;border:1px solid #2a3355;border-radius:10px;padding:12px;margin:8px 0}.q{font-size:16px;font-weight:700;margin:6px 0}.choice{padding:8px 10px;margin:4px 0;border-radius:8px;background:#1f2742;border:1px solid #334}.sel{background:#00c853;border-color:#00e676;color:#000;font-weight:700}.correct{background:#2962ff;border-color:#448aff;color:#fff;font-weight:700}.meta{color:#9aa;font-size:12px}.status{color:#ffab00}</style></head><body><h1>JZ Kahoot Peili</h1><div class="meta">Tila: <span id="status" class="status">-</span> | Mode: <span id="mode">-</span> | PIN: <span id="pin">-</span></div><div class="card"><div class="q" id="q">Odotetaan...</div><div id="choices"></div></div><div class="meta" id="sel">Valittu: -</div><div class="meta" id="corr">Oikeat: -</div><script>async function tick(){try{const r=await fetch('/state');const d=await r.json();document.getElementById('status').textContent=d.status;document.getElementById('mode').textContent=d.mode;document.getElementById('pin').textContent=d.pin;document.getElementById('q').textContent=d.question||'Odotetaan...';const c=document.getElementById('choices');c.innerHTML='';(d.choices||[]).forEach((x,i)=>{let cls='choice';if(Array.isArray(d.selected)&&d.selected.includes(i))cls+=' sel';else if(d.selected===i)cls+=' sel';if(Array.isArray(d.correct)&&d.correct.includes(i))cls+=' correct';const div=document.createElement('div');div.className=cls;div.textContent=i+': '+x; c.appendChild(div);});document.getElementById('sel').textContent='Valittu: '+(Array.isArray(d.selected)?d.selected.join(','):(d.selected===null?'-':d.selected));document.getElementById('corr').textContent='Oikeat: '+(Array.isArray(d.correct)?d.correct.join(','):(d.correct===null?'-':d.correct));}catch(e){}}setInterval(tick,500);tick();</script></body></html>`;
   const srv = http.createServer((req, res) => {
     if (req.url === '/') { res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' }); res.end(html); }
     else if (req.url === '/state') { res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' }); res.end(JSON.stringify(mirrorState)); }
@@ -284,6 +291,7 @@ async function runAutoAnswer() {
       mirrorState.question = (qData2 && (qData2.question || qData2.title)) || `Kysymys ${qi + 1}`;
       mirrorState.choices = Array.isArray(qData2 && qData2.choices) ? qData2.choices.map(c => c.answer || '') : Array.from({length: choiceCount}, (_,i)=>`Vaihtoehto ${i}`);
       mirrorState.selected = null;
+      mirrorState.correct = null;
       mirrorState.questionIndex = qi;
     } catch (e) {}
 
