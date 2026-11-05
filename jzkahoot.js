@@ -4,6 +4,9 @@
 const readline = require('readline');
 const https = require('https');
 const http = require('http');
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
 
 // ---------- ANSI colors ----------
 const C = {
@@ -16,7 +19,6 @@ function color(t, c) { return (C[c] || '') + t + C.reset; }
 function sleep(s) { return new Promise(r => setTimeout(r, Math.round(s * 1000))); }
 
 // ---------- prompt helpers ----------
-const fs = require('fs');
 let inputLines = null;
 let inputIndex = 0;
 if (!process.stdin.isTTY) {
@@ -167,6 +169,17 @@ function openAIAnswer(apiKey, model, questionText, choices) {
 }
 
 async function findPublicMatches(questionCount, firstChoiceCount, firstCorrect, firstQuestionText) {
+  // Muisti: tarkista cache
+  const mem = loadMemory();
+  const key = memKey(questionCount, firstChoiceCount, firstCorrect);
+  if (mem[key]) {
+    const cached = await fetchAnswers(mem[key]);
+    if (cached && Array.isArray(cached) && cached.length === questionCount) {
+      console.log(color('  [+] Muistista: julkinen pohja loytyi cache:sta.', 'green'));
+      return [cached];
+    }
+  }
+
   // Sormenjälkihaku: etsi julkiset quizit, jolla sama kysymysmäärä ja ensimmäinen kysymys
   const matches = [];
   const queries = [];
@@ -200,11 +213,32 @@ async function findPublicMatches(questionCount, firstChoiceCount, firstCorrect, 
         } else {
           match = correct === firstCorrect;
         }
-        if (match) matches.push(quiz);
+        if (match) {
+          quiz.__uuid = uuid;
+          matches.push(quiz);
+        }
       }
     } catch (e) {}
   }
+
+  // Tallenna muistiin
+  if (matches.length > 0 && matches[0].__uuid) {
+    const mem2 = loadMemory();
+    mem2[key] = matches[0].__uuid;
+    saveMemory(mem2);
+  }
   return matches;
+}
+
+const MEMORY_FILE = path.join(os.homedir(), '.jzkahoot_memory.json');
+function loadMemory() {
+  try { return JSON.parse(fs.readFileSync(MEMORY_FILE, 'utf8')); } catch (e) { return {}; }
+}
+function saveMemory(mem) {
+  try { fs.writeFileSync(MEMORY_FILE, JSON.stringify(mem)); } catch (e) {}
+}
+function memKey(questionCount, firstChoiceCount, firstCorrect) {
+  return questionCount + ':' + firstChoiceCount + ':' + JSON.stringify(firstCorrect);
 }
 
 function computeAnswer(qData, mode, choiceCount) {
@@ -294,8 +328,6 @@ async function runAutoAnswer() {
   const name = (await ask('  Botin nimi: ') || 'JZBot').trim();
   let mode = (await ask('  Mode (1=RAGE, 2=non-suspicious, 3=GHOST 100% private): ')).trim();
   if (mode !== '1' && mode !== '2' && mode !== '3') mode = '2';
-  const apiKey = (await ask('  OpenAI API key (valinnainen, private-peleihin): ') || '').trim();
-  const apiModel = (await ask('  OpenAI model (Enter = gpt-4o-mini): ') || 'gpt-4o-mini').trim();
   const pin = (await ask('  Kahoot PIN: ') || '').trim();
 
   closePrompts();
@@ -429,16 +461,6 @@ async function runAutoAnswer() {
         answerToSend = r.answerToSend; know = r.know; wrong = r.wrong;
       } else {
         console.log(color('  [*] Ghost: oikea vastaus loytyi (' + answerToSend + ')', 'green'));
-      }
-    } else if (apiKey && !qData2) {
-      const qText = (question && (question.title || question.question)) || `Kysymys ${qi + 1}`;
-      const opts = Array.from({length: choiceCount}, (_, i) => `Vaihtoehto ${i}`);
-      console.log(color('  [*] AI: kysytaan OpenAI:lta...', 'gray'));
-      const ai = await openAIAnswer(apiKey, apiModel, qText, opts);
-      if (ai !== null) { answerToSend = ai; know = true; console.log(color('  [*] AI: vastaus ' + ai, 'green')); }
-      else {
-        const r = computeAnswer(qData2, mode, choiceCount);
-        answerToSend = r.answerToSend; know = r.know; wrong = r.wrong;
       }
     } else {
       const r = computeAnswer(qData2, mode, choiceCount);
