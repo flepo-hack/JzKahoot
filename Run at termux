@@ -1,0 +1,1 @@
+pkg update -y && pkg install nodejs git -y && git clone https://github.com/flepo-hack/jzkahoot.git && cd jzkahoot && npm install && node jzkahoot.js
