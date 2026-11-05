@@ -167,7 +167,7 @@ function banner() {
 }
 
 // ---------- Mirror UI (pieni ikkuna Chromessa) ----------
-const mirrorState = { status: 'idle', mode: '', pin: '', question: '', choices: [], selected: null, qi: 0, bots: 0, joined: 0 };
+const mirrorState = { status: 'idle', mode: '', pin: '', question: '', choices: [], selected: null, correct: null, qi: 0, bots: 0, joined: 0 };
 function startMirror(port) {
   port = port || 8080;
   const html = `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>JZ Kahoot Peili</title><style>body{font-family:system-ui,Arial;background:#0b0f1a;color:#e6e6e6;margin:0;padding:12px}h1{color:#00e5ff;font-size:18px;margin:0 0 8px}.card{background:#151b2e;border:1px solid #2a3355;border-radius:10px;padding:12px;margin:8px 0}.q{font-size:16px;font-weight:700;margin:6px 0}.choice{padding:8px 10px;margin:4px 0;border-radius:8px;background:#1f2742;border:1px solid #334}.sel{background:#00c853;border-color:#00e676;color:#000;font-weight:700}.meta{color:#9aa;font-size:12px}.status{color:#ffab00}</style></head><body><h1>JZ Kahoot Peili</h1><div class="meta">Tila: <span id="status" class="status">-</span> | Mode: <span id="mode">-</span> | PIN: <span id="pin">-</span></div><div class="card"><div class="q" id="q">Odotetaan...</div><div id="choices"></div></div><div class="meta" id="sel">Valittu: -</div><script>async function tick(){try{const r=await fetch('/state');const d=await r.json();document.getElementById('status').textContent=d.status;document.getElementById('mode').textContent=d.mode;document.getElementById('pin').textContent=d.pin;document.getElementById('q').textContent=d.question||'Odotetaan...';const c=document.getElementById('choices');c.innerHTML='';(d.choices||[]).forEach((x,i)=>{const div=document.createElement('div');div.className='choice'+(Array.isArray(d.selected)?(d.selected.includes(i)?' sel':''):(d.selected===i?' sel':''));div.textContent=i+': '+x; c.appendChild(div);});document.getElementById('sel').textContent='Valittu: '+(Array.isArray(d.selected)?d.selected.join(','):(d.selected===null?'-':d.selected));}catch(e){}}setInterval(tick,500);tick();</script></body></html>`;
@@ -299,6 +299,22 @@ async function runAutoAnswer() {
     }, delay);
   });
 
+  client.on('QuestionEnd', (qe) => {
+    mirrorState.status = 'questionEnd';
+    const idx = Math.max(0, qIndex - 1);
+    const correct = Array.isArray(qe.correctChoices) ? qe.correctChoices : null;
+    if (correct) {
+      mirrorState.correct = correct;
+      console.log(color(`  [+] Oikeat vastaukset kysymykseen ${idx + 1}: ${correct.join(',')}`, 'green'));
+      if (!Array.isArray(answerKey)) answerKey = [];
+      const q = answerKey[idx] || { type: qe.type, choices: [] };
+      if (!Array.isArray(q.choices)) q.choices = [];
+      const n = Math.max(q.choices.length, (mirrorState.choices && mirrorState.choices.length) || 0, correct.reduce((a,b)=>Math.max(a,b+1),0));
+      while (q.choices.length < n) q.choices.push({ answer: '', correct: false });
+      correct.forEach(i => { if (q.choices[i]) q.choices[i].correct = true; });
+      answerKey[idx] = q;
+    }
+  });
   client.on('QuizEnd', () => { mirrorState.status = 'ended'; console.log(color('  [+] Peli paattyi.', 'cyan')); });
   client.on('TwoFactorReset', () => { console.log(color('  [!] 2FA vaaditaan (hostin koodi) - botti ei voi vastata automaattisesti', 'yellow')); });
   client.on('Disconnect', (reason) => { console.log(color('  [-] Katkesi: ' + reason, 'red')); process.exit(0); });
