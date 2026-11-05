@@ -69,20 +69,17 @@ function exitAll() {
 // ---------- helpers ----------
 function findUuids(obj, out, key) {
   out = out || [];
-  key = key || '';
   if (typeof obj === 'string') {
-    if (/quiz|uuid|kahoot|game/i.test(key)) {
-      const m = obj.match(/[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}/i);
-      if (m && out.indexOf(m[0]) === -1) out.push(m[0]);
-    }
+    const m = obj.match(/[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}/i);
+    if (m && out.indexOf(m[0]) === -1) out.push(m[0]);
     return out;
   }
   if (!obj || typeof obj !== 'object') return out;
   if (Array.isArray(obj)) {
-    obj.forEach((x, i) => findUuids(x, out, String(i)));
+    obj.forEach((x) => findUuids(x, out));
     return out;
   }
-  for (const k of Object.keys(obj)) findUuids(obj[k], out, k);
+  for (const k of Object.keys(obj)) findUuids(obj[k], out);
   return out;
 }
 
@@ -162,7 +159,11 @@ function computeAnswer(qData, mode, choiceCount) {
 
 function banner() {
   try { if (process.stdout.isTTY) console.clear(); } catch (e) {}
-  console.log(color('  JZ KAHOOT BOT  -  V3.4  -  TERMUX', 'cyan'));
+  console.log(color('   __  _  ______  _  __  ___   ___  __  __  ___  ___ ', 'cyan'));
+  console.log(color('  (_  ( \\(  __  )( \\/  )/ __) / __)(  )(  )/ __)/ __)', 'cyan'));
+  console.log(color('   /  / \\ ) (  ) )    (\\__ \\( (__  )(__)( \\__ \\\\__ \\', 'cyan'));
+  console.log(color('  (__) (__(____/ )_/\\_( (___/ \\___)(______)(___/( (___', 'cyan'));
+  console.log(color('        JZ KAHOOT BOT  -  V3.5  -  TERMUX', 'magenta'));
   console.log(color('  Auto Answer + Flooder + Leaver  |  Shift+Q = stop', 'gray'));
   console.log('');
 }
@@ -190,6 +191,7 @@ function startMirror(port) {
       const url = `http://localhost:${p}`;
       console.log(color(`  [UI] Peili (avaa Chromessa): ${url}`, 'cyan'));
       try { require('child_process').exec('termux-open-url ' + url); } catch (e) {}
+      try { require('child_process').exec('am start -a android.intent.action.VIEW -d ' + url); } catch (e) {}
     });
     srv.on('error', (e) => {
       if (e.code === 'EADDRINUSE') tryListen(p + 1);
