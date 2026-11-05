@@ -90,7 +90,8 @@ async function fetchAnswers(uuid) {
   if (!uuid) return null;
   const urls = [
     `https://create.kahoot.it/rest/kahoots/${uuid}`,
-    `https://kahoot.it/rest/kahoots/${uuid}`
+    `https://kahoot.it/rest/kahoots/${uuid}`,
+    `https://play.kahoot.it/rest/kahoots/${uuid}`
   ];
   for (const u of urls) {
     try {
@@ -365,19 +366,77 @@ async function runFlooder() {
   console.log(color('  [*] Paina Iso Q lopettaaksesi.', 'gray'));
 }
 
+// ---------- Leaver (botit poistuvat pelista) ----------
+async function runLeaver() {
+  console.log(color('  [ LEAVER ]', 'bold'));
+  const base = (await ask('  Bottien nimi (prefix): ') || 'JZBot').trim();
+  const count = parseInt(await ask('  Kuinka monta bottia: '), 10) || 1;
+  const pin = (await ask('  Kahoot PIN: ') || '').trim();
+  const delaySec = parseInt(await ask('  Poistumisviive (sek, 0=heti): '), 10) || 0;
+
+  closePrompts();
+  enableRawExit();
+  mirrorState.status = 'leaving';
+  mirrorState.mode = 'leaver';
+  mirrorState.pin = pin;
+  mirrorState.bots = count;
+  mirrorState.joined = 0;
+  startMirror(8082);
+
+  const Kahoot = require('kahoot.js-latest');
+  console.log(color(`  [*] Liitetaan ${count} bottia ja poistetaan ${delaySec}s kuluttua...`, 'cyan'));
+
+  let joined = 0, failed = 0;
+  const clients2 = [];
+  for (let i = 1; i <= count; i++) {
+    const name = `${base}${i}\u200B`;
+    try {
+      const res = Kahoot.join(pin, name);
+      const client = res.client;
+      const event = res.event;
+      registerClient(client);
+      clients2.push(client);
+      event.then(() => {
+        joined++;
+        mirrorState.joined = joined;
+        console.log(color(`  [+] Bot ${i} liittyi (${joined}/${count})`, 'green'));
+      }).catch((e) => {
+        failed++;
+        console.log(color(`  [-] Bot ${i} epaonnistui: ${e && e.description || e}`, 'red'));
+      });
+    } catch (e) {
+      failed++;
+      console.log(color(`  [-] Bot ${i} virhe: ${e && e.description || e}`, 'red'));
+    }
+    await sleep(0.15);
+  }
+
+  await sleep(delaySec);
+  console.log(color('  [*] Poistetaan botit...', 'yellow'));
+  for (const c of clients2) { try { c.leave(); } catch (e) {} }
+  mirrorState.status = 'done';
+  console.log(color(`  [+] Poistettu. Liittyneet: ${joined}, epaonnistuneet: ${failed}`, 'green'));
+  console.log(color('  [*] Paina Iso Q lopettaaksesi.', 'gray'));
+}
+
 // ---------- Main ----------
 async function main() {
   banner();
   console.log(color('  Valitse toiminto:', 'bold'));
   console.log(color('  1 = Auto Answer Bot', 'green'));
-  console.log(color('  2 = Flooder', 'red'));
+  console.log(color('  2 = Flooder / Crasher', 'red'));
+  console.log(color('  3 = Leaver (botit poistuvat)', 'yellow'));
   console.log('');
-  const c = (await ask('  Valinta (1/2): ')).trim();
+  const c = (await ask('  Valinta (1/2/3): ')).trim();
   if (c === '1') await runAutoAnswer();
   else if (c === '2') await runFlooder();
+  else if (c === '3') await runLeaver();
   else { console.log(color('  Virheellinen valinta.', 'red')); process.exit(0); }
 
   setInterval(() => {}, 60000);
 }
+
+process.on('uncaughtException', (e) => { console.error(color('  [!] Virhe: ' + (e && e.message || e), 'red')); });
+process.on('unhandledRejection', (e) => { console.error(color('  [!] Lupausvirhe: ' + (e && e.message || e), 'red')); });
 
 main().catch(e => { console.error(e); process.exit(1); });
