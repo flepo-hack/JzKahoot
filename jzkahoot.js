@@ -69,20 +69,25 @@ function exitAll() {
 }
 
 // ---------- helpers ----------
-function findUuids(obj, out, key) {
-  out = out || [];
+function extractMeta(obj, meta, key) {
+  meta = meta || { uuids: [], titles: [], hosts: [], media: [] };
+  key = (key || '').toLowerCase();
   if (typeof obj === 'string') {
-    const m = obj.match(/[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}/i);
-    if (m && out.indexOf(m[0]) === -1) out.push(m[0]);
-    return out;
+    const m = obj.match(/[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}/ig);
+    if (m) for (const u of m) { if (meta.uuids.indexOf(u) === -1) meta.uuids.push(u); }
+    if ((key.indexOf('title') !== -1 || key.indexOf('quizname') !== -1 || key.indexOf('name') !== -1) && obj.length > 2 && obj.length < 120 && !/^https?:/.test(obj) && key.indexOf('username') === -1 && key.indexOf('nickname') === -1) {
+      if (meta.titles.indexOf(obj) === -1) meta.titles.push(obj);
+    }
+    if ((key.indexOf('host') !== -1 || key.indexOf('creator') !== -1 || key.indexOf('author') !== -1) && obj.length > 1 && obj.length < 60 && !/^https?:/.test(obj)) {
+      if (meta.hosts.indexOf(obj) === -1) meta.hosts.push(obj);
+    }
+    if (/https?:\/\/.*(images|media|kahoot)/i.test(obj) && meta.media.indexOf(obj) === -1) meta.media.push(obj);
+    return meta;
   }
-  if (!obj || typeof obj !== 'object') return out;
-  if (Array.isArray(obj)) {
-    obj.forEach((x) => findUuids(x, out));
-    return out;
-  }
-  for (const k of Object.keys(obj)) findUuids(obj[k], out);
-  return out;
+  if (!obj || typeof obj !== 'object') return meta;
+  if (Array.isArray(obj)) { obj.forEach(x => extractMeta(x, meta, key)); return meta; }
+  for (const k of Object.keys(obj)) extractMeta(obj[k], meta, k);
+  return meta;
 }
 
 async function fetchAnswers(uuid) {
@@ -168,66 +173,120 @@ function openAIAnswer(apiKey, model, questionText, choices) {
   });
 }
 
-async function findPublicMatches(questionCount, firstChoiceCount, firstCorrect, firstQuestionText) {
-  // Muisti: tarkista cache
+async function findPublicMatches(questionCount, firstChoiceCount, firstCorrect, firstQuestionText, hints) {
+  hints = hints || {};
+  // Muisti: tarkista cache (sormenjälki + Q1)
   const mem = loadMemory();
   const key = memKey(questionCount, firstChoiceCount, firstCorrect);
   if (mem[key]) {
     const cached = await fetchAnswers(mem[key]);
     if (cached && Array.isArray(cached) && cached.length === questionCount) {
-      console.log(color('  [+] Muistista: julkinen pohja loytyi cache:sta.', 'green'));
+      console.log(color('  [+] Muistista: julkinen pohja (' + mem[key] + ')', 'green'));
+      cached.__uuid = mem[key];
       return [cached];
     }
   }
-
-  // Sormenjälkihaku: etsi julkiset quizit, jolla sama kysymysmäärä ja ensimmäinen kysymys
-  const matches = [];
-  const queries = [];
-  if (firstQuestionText) {
-    const words = String(firstQuestionText).trim().split(/\s+/);
-    queries.push(words.slice(0, 6).join(' '));
-    if (words.length > 3) queries.push(words.slice(0, 3).join(' '));
+  // rakenne-cache (pelkkä kysymysmäärä + vaihtoehtomäärät)
+  const structKey = questionCount + ':' + (hints.choiceCounts || []).join(',');
+  if (mem[structKey]) {
+    const cached = await fetchAnswers(mem[structKey]);
+    if (cached && Array.isArray(cached) && cached.length === questionCount) {
+      cached.__uuid = mem[structKey];
+      // varmista Q1 jos tiedossa
+      if (firstCorrect != null) {
+        const ok = matchQ(cached, 0, firstChoiceCount, firstCorrect);
+        if (ok) { console.log(color('  [+] Muistista (rakenne): ' + mem[structKey], 'green')); return [cached]; }
+      } else {
+        console.log(color('  [+] Muistista (rakenne): ' + mem[structKey], 'green'));
+        return [cached];
+      }
+    }
   }
-  queries.push(''); // fallback: kaikki
+
+  const queries = [];
+  const addQ = (q) => { q = String(q || '').trim(); if (q && queries.indexOf(q) === -1) queries.push(q); };
+  if (hints.title) addQ(hints.title);
+  if (hints.host) addQ(hints.host);
+  if (firstQuestionText) {
+    const words = String(firstQuestionText).trim().split(/s+/);
+    addQ(words.slice(0, 8).join(' '));
+    if (words.length > 4) addQ(words.slice(0, 4).join(' '));
+  }
+  addQ(''); // fallback
+
   const seen = new Set();
+  const candidates = [];
   for (const query of queries) {
-    const url = 'https://create.kahoot.it/rest/kahoots/?query=' + encodeURIComponent(query) + '&limit=50&orderBy=relevance';
+    if (candidates.length >= 10) break; // riittavasti
+    const url = 'https://create.kahoot.it/rest/kahoots/?query=' + encodeURIComponent(query) + '&limit=50&orderBy=relevance&includeKahoot=false';
+    let entities = [];
     try {
       const data = await httpGetJson(url, 10000);
-      const entities = (data && data.entities) ? data.entities : [];
-      for (const ent of entities) {
-        const uuid = ent.card && ent.card.uuid;
-        if (!uuid || seen.has(uuid)) continue;
-        seen.add(uuid);
-        const quiz = await fetchAnswers(uuid);
-        if (!quiz || !Array.isArray(quiz) || quiz.length !== questionCount) continue;
-        const q0 = quiz[0];
-        if (!q0 || !Array.isArray(q0.choices)) continue;
-        if (q0.choices.length !== firstChoiceCount) continue;
-        const idxs = q0.choices.map((c, i) => (c && c.correct) ? i : -1).filter(i => i >= 0);
-        if (idxs.length === 0) continue;
-        const correct = (idxs.length === 1) ? idxs[0] : idxs;
-        let match = false;
-        if (Array.isArray(correct) && Array.isArray(firstCorrect)) {
-          match = JSON.stringify(correct) === JSON.stringify(firstCorrect);
-        } else {
-          match = correct === firstCorrect;
+      entities = (data && data.entities) ? data.entities : [];
+    } catch (e) { continue; }
+    // suodata card-tasolla ensin (nopeampi)
+    const uuids = [];
+    for (const ent of entities) {
+      const card = ent.card || ent;
+      const uuid = card.uuid;
+      if (!uuid || seen.has(uuid)) continue;
+      seen.add(uuid);
+      // jos card kertoo kysymysmäärän, käytä sitä
+      const noq = card.number_of_questions || card.numberOfQuestions;
+      if (noq && Number(noq) !== questionCount) continue;
+      uuids.push(uuid);
+      if (uuids.length >= 60) break;
+    }
+    // hae rinnakkain pienissä erissä
+    for (let i = 0; i < uuids.length; i += 10) {
+      const batch = uuids.slice(i, i + 10);
+      const results = await Promise.all(batch.map(u => fetchAnswers(u).then(q => ({ u, q })).catch(() => null)));
+      for (const r of results) {
+        if (!r || !r.q || !Array.isArray(r.q)) continue;
+        const quiz = r.q;
+        if (quiz.length !== questionCount) continue;
+        // rakennevertailu: vaihtoehtomäärät
+        if (hints.choiceCounts && hints.choiceCounts.length === questionCount) {
+          let structOk = true;
+          for (let qi = 0; qi < hints.choiceCounts.length; qi++) {
+            const cc = (quiz[qi] && quiz[qi].choices) ? quiz[qi].choices.length : 0;
+            if (hints.choiceCounts[qi] && cc !== hints.choiceCounts[qi]) { structOk = false; break; }
+          }
+          if (!structOk) continue;
         }
-        if (match) {
-          quiz.__uuid = uuid;
-          matches.push(quiz);
+        // Q1 tarkistus jos tiedossa
+        if (firstCorrect != null && firstChoiceCount) {
+          if (!matchQ(quiz, 0, firstChoiceCount, firstCorrect)) continue;
         }
+        quiz.__uuid = r.u;
+        candidates.push(quiz);
+        if (candidates.length >= 10) break;
       }
-    } catch (e) {}
+      if (candidates.length >= 10) break;
+    }
   }
 
-  // Tallenna muistiin
-  if (matches.length > 0 && matches[0].__uuid) {
+  if (candidates.length > 0) {
     const mem2 = loadMemory();
-    mem2[key] = matches[0].__uuid;
-    saveMemory(mem2);
+    if (candidates[0].__uuid) {
+      mem2[key] = candidates[0].__uuid;
+      if (hints.choiceCounts && hints.choiceCounts.length) mem2[structKey] = candidates[0].__uuid;
+      saveMemory(mem2);
+    }
   }
-  return matches;
+  return candidates;
+}
+
+function matchQ(quiz, idx, choiceCount, correct) {
+  const q = quiz[idx];
+  if (!q || !Array.isArray(q.choices)) return false;
+  if (choiceCount && q.choices.length !== choiceCount) return false;
+  const idxs = q.choices.map((c, i) => (c && c.correct) ? i : -1).filter(i => i >= 0);
+  if (idxs.length === 0) return false;
+  const norm = (idxs.length === 1) ? idxs[0] : idxs;
+  const want = (Array.isArray(correct) && correct.length === 1) ? correct[0] : correct;
+  if (Array.isArray(norm) && Array.isArray(want)) return JSON.stringify(norm) === JSON.stringify(want);
+  return norm === want;
 }
 
 const MEMORY_FILE = path.join(os.homedir(), '.jzkahoot_memory.json');
@@ -354,21 +413,41 @@ async function runAutoAnswer() {
     client.defaults.options.ChallengeAutoContinue = true;
   } catch (e) {}
 
+  let leakedTitle = null;
+  let leakedHost = null;
   const origMessage = client._message.bind(client);
   client._message = function (msg) {
     try {
       const parsed = JSON.parse(msg);
       const arr = Array.isArray(parsed) ? parsed : [parsed];
       for (const m of arr) {
-        const found = findUuids(m);
-        for (const u of found) {
-          if (!quizUuid) {
-            quizUuid = u;
-            fetchAnswers(u).then(k => {
-              const ok = k && (!client.quiz || !Array.isArray(client.quiz.quizQuestionAnswers) || k.length === client.quiz.quizQuestionAnswers.length);
-              if (ok) { answerKey = k; console.log(color(`  [+] Nuuskittiin UUID (${u}) - vastaukset ladattu (${k.length})`, 'green')); }
-            }).catch(() => {});
+        // capture question/title text if present in any content
+        try {
+          if (m && m.data && m.data.content) {
+            const c = JSON.parse(m.data.content);
+            if (c && (c.title || c.question) && (c.questionIndex === 0 || !firstQuestionText)) {
+              if (!firstQuestionText) firstQuestionText = c.title || c.question;
+            }
+            if (c && c.quizTitle && !leakedTitle) leakedTitle = c.quizTitle;
+            if (c && c.hostId && !leakedHost) leakedHost = c.hostId;
           }
+        } catch (e) {}
+        const meta = extractMeta(m);
+        if (meta.titles.length && !leakedTitle) leakedTitle = meta.titles[0];
+        if (meta.hosts.length && !leakedHost) leakedHost = meta.hosts[0];
+        for (const u of meta.uuids) {
+          if (quizUuid) continue;
+          // try fetching; validate against quizQuestionAnswers length when known
+          fetchAnswers(u).then(k => {
+            if (!k || !Array.isArray(k)) return;
+            const expected = (client.quiz && Array.isArray(client.quiz.quizQuestionAnswers)) ? client.quiz.quizQuestionAnswers.length : null;
+            if (expected && k.length !== expected) return;
+            if (!answerKey) {
+              quizUuid = u;
+              answerKey = k;
+              console.log(color(`  [+] Nuuskittu UUID (${u}) - vastaukset ladattu (${k.length})`, 'green'));
+            }
+          }).catch(() => {});
         }
       }
     } catch (e) {}
@@ -378,20 +457,86 @@ async function runAutoAnswer() {
   client.on('Joined', (settings) => {
     console.log(color('  [+] Liitytty peliin. Odotetaan aloitusta...', 'green'));
     mirrorState.status = 'joined';
+    // harvest leaked metadata from session/settings
+    try {
+      const meta = extractMeta(settings);
+      if (meta.titles.length && !leakedTitle) leakedTitle = meta.titles[0];
+      if (meta.hosts.length && !leakedHost) leakedHost = meta.hosts[0];
+      for (const u of meta.uuids) {
+        if (quizUuid || answerKey) continue;
+        fetchAnswers(u).then(k => {
+          if (k && Array.isArray(k) && !answerKey) { quizUuid = u; answerKey = k; console.log(color(`  [+] Metadatasta UUID (${u}) - vastaukset (${k.length})`, 'green')); }
+        }).catch(() => {});
+      }
+    } catch (e) {}
     if (client.challengeData && client.challengeData.kahoot && client.challengeData.kahoot.questions) {
       answerKey = client.challengeData.kahoot.questions;
       console.log(color(`  [+] Challenge: vastaukset ladattu (${answerKey.length} kysymysta)`, 'green'));
     }
   });
 
+  let structCandidates = null; // rakenne-esisuodatus
   client.on('QuizStart', (quiz) => {
     console.log(color('  [*] Quiz alkoi.', 'cyan'));
     mirrorState.status = 'quiz';
+    // vuotanut metadata
+    try {
+      const meta = extractMeta(quiz);
+      if (meta.titles.length && !leakedTitle) leakedTitle = meta.titles[0];
+      for (const u of meta.uuids) {
+        if (quizUuid || answerKey) continue;
+        fetchAnswers(u).then(k => { if (k && !answerKey) { quizUuid = u; answerKey = k; console.log(color(`  [+] QuizStart UUID (${u})`, 'green')); } }).catch(()=>{});
+      }
+    } catch (e) {}
     if ((!answerKey) && client.challengeData && client.challengeData.kahoot && client.challengeData.kahoot.questions) {
       answerKey = client.challengeData.kahoot.questions;
       console.log(color(`  [+] Vastaukset ladattu challenge-datasta (${answerKey.length})`, 'green'));
     }
+    // rakenne-esihaku taustalla (nopeuttaa Q1 jälkeen)
+    if (!answerKey && !structCandidates && Array.isArray(quiz.quizQuestionAnswers)) {
+      structCandidates = prefetchByStructure(quiz.quizQuestionAnswers, leakedTitle, leakedHost);
+    }
   });
+
+  async function prefetchByStructure(choiceCounts, title, host) {
+    const qCount = choiceCounts.length;
+    const queries = [];
+    if (title) queries.push(title);
+    if (host) queries.push(host);
+    if (!queries.length) return [];
+    const seen = new Set();
+    const found = [];
+    for (const query of queries) {
+      if (found.length >= 30) break;
+      try {
+        const data = await httpGetJson('https://create.kahoot.it/rest/kahoots/?query=' + encodeURIComponent(query) + '&limit=40&orderBy=relevance', 8000);
+        const entities = (data && data.entities) ? data.entities : [];
+        const uuids = [];
+        for (const ent of entities) {
+          const card = ent.card || ent;
+          const uuid = card.uuid;
+          if (!uuid || seen.has(uuid)) continue;
+          const noq = card.number_of_questions || card.numberOfQuestions;
+          if (noq && Number(noq) !== qCount) continue;
+          seen.add(uuid); uuids.push(uuid);
+        }
+        for (let i = 0; i < uuids.length; i += 12) {
+          const batch = uuids.slice(i, i + 12);
+          const res = await Promise.all(batch.map(u => fetchAnswers(u).then(q => ({u,q})).catch(()=>null)));
+          for (const r of res) {
+            if (!r || !r.q || r.q.length !== qCount) continue;
+            let ok = true;
+            for (let qi = 0; qi < choiceCounts.length; qi++) {
+              const cc = (r.q[qi] && r.q[qi].choices) ? r.q[qi].choices.length : 0;
+              if (choiceCounts[qi] && cc !== choiceCounts[qi]) { ok = false; break; }
+            }
+            if (ok) { r.q.__uuid = r.u; found.push(r.q); }
+          }
+        }
+      } catch (e) {}
+    }
+    return found;
+  }
 
   let qIndex = 0;
   client.on('QuestionStart', async (question) => {
@@ -466,15 +611,42 @@ async function runAutoAnswer() {
         const qCount = (client.quiz && Array.isArray(client.quiz.quizQuestionAnswers)) ? client.quiz.quizQuestionAnswers.length : (answerKey.length || 1);
         const firstChoiceCount = (mirrorState.choices && mirrorState.choices.length) || correct.reduce((a,b)=>Math.max(a,b+1),0);
         const firstCorrect = (correct.length === 1) ? correct[0] : correct;
-        console.log(color('  [*] Sormenjälkihaku julkisista pohjista (1000+ vertailu)...', 'gray'));
-        const matches = await findPublicMatches(qCount, firstChoiceCount, firstCorrect, firstQuestionText);
+        const hints = {
+          title: leakedTitle,
+          host: leakedHost,
+          choiceCounts: (client.quiz && Array.isArray(client.quiz.quizQuestionAnswers)) ? client.quiz.quizQuestionAnswers : null
+        };
+        console.log(color('  [*] Sormenjälkihaku (metadata + rakenne + QuestionEnd)...', 'gray'));
+        if (hints.title) console.log(color('  [*] Vuotanut title: ' + hints.title, 'gray'));
+        if (hints.host) console.log(color('  [*] Vuotanut host/creator: ' + hints.host, 'gray'));
+        let matches = [];
+        // 1) rakenne-esiehdokkaat (nopea)
+        try {
+          const pre = structCandidates ? await Promise.race([structCandidates, sleep(2).then(()=>[])]) : [];
+          if (Array.isArray(pre) && pre.length) {
+            matches = pre.filter(c => matchQ(c, 0, firstChoiceCount, firstCorrect));
+            if (matches.length) console.log(color('  [+] Rakenne-esihaku osui: ' + matches.length + ' ehdokasta', 'green'));
+          }
+        } catch (e) {}
+        // 2) taydennys haulla
+        if (matches.length === 0) {
+          matches = await findPublicMatches(qCount, firstChoiceCount, firstCorrect, firstQuestionText, hints);
+        } else {
+          // hae lisaa taustalla mutta ala odota pitkään
+          findPublicMatches(qCount, firstChoiceCount, firstCorrect, firstQuestionText, hints).then(extra => {
+            if (Array.isArray(extra) && extra.length > publicCandidates.length) {
+              publicCandidates = extra;
+              console.log(color('  [+] Lisäehdokkaita hausta: ' + extra.length, 'green'));
+            }
+          }).catch(()=>{});
+        }
         publicCandidates = matches;
         candidatePos = 0;
         if (matches.length > 0) {
           answerKey = matches[0];
           console.log(color(`  [+] Julkinen pohja loytyi! ${matches.length} matchia. Ladattu ${answerKey.length} kysymyksen vastaukset.`, 'green'));
         } else {
-          console.log(color('  [-] Julkista pohjaa ei loytynyt (private quiz).', 'gray'));
+          console.log(color('  [-] Julkista pohjaa ei loytynyt. Vastaukset kerataan QuestionEndista (private).', 'gray'));
         }
       }
 
