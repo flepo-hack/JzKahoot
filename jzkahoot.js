@@ -535,6 +535,7 @@ async function runAutoAnswer() {
   let publicCandidates = [];
   let candidatePos = 0;
   let firstQuestionText = null;
+  let _rawCorrect = [];
 
   const client = new Kahoot();
   registerClient(client);
@@ -549,7 +550,23 @@ async function runAutoAnswer() {
   let leakedHost = null;
   const origMessage = client._message.bind(client);
   client._message = function (msg) {
-    try { if (JZ_DEBUG) { const p=JSON.parse(msg); const arr=Array.isArray(p)?p:[p]; arr.forEach(m=>{ if(m&&m.channel) dbg('ws', m.channel, m.data&&m.data.id, m.data&&m.data.type); }); } } catch(e){}
+    try {
+      const p=JSON.parse(msg); const arr=Array.isArray(p)?p:[p];
+      arr.forEach(m=>{
+        if (JZ_DEBUG && m && m.channel) dbg('ws', m.channel, m.data&&m.data.id, m.data&&m.data.type);
+        try {
+          if (m && m.data && m.data.content) {
+            const c = JSON.parse(m.data.content);
+            // id 8 = QuestionEnd in some mappings; id 2/1 question start/ready - fallback handled by lib, but capture correctChoices if present
+            if (Array.isArray(c.correctChoices) && typeof c.questionIndex === 'number') {
+              // stash for handler
+              if (!Array.isArray(_rawCorrect)) _rawCorrect = [];
+              _rawCorrect[c.questionIndex] = c.correctChoices;
+            }
+          }
+        } catch(e){}
+      });
+    } catch(e){}
     try {
       const parsed = JSON.parse(msg);
       const arr = Array.isArray(parsed) ? parsed : [parsed];
@@ -789,13 +806,16 @@ async function runAutoAnswer() {
   }
   client.on('QuestionStart', handleQuestionStart);
   try { client.on('questionStart', handleQuestionStart); } catch(e){}
-  try { client.on('QuestionReady', (q)=>dbg('QuestionReady', q&&q.questionIndex)); } catch(e){}
+  try { client.on('QuestionReady', (q)=>{ dbg('QuestionReady', q&&q.questionIndex); if (q && Array.isArray(q.quizQuestionAnswers) && client.quiz) client.quiz.quizQuestionAnswers = q.quizQuestionAnswers; }); } catch(e){}
+  try { client.on('GetReady', (q)=>dbg('GetReady')); } catch(e){}
 
   async function handleQuestionEnd(qe) {
     qe = qe || {};
+    try { if (qe.content && typeof qe.content === 'string') qe = Object.assign({}, qe, JSON.parse(qe.content)); } catch(e){}
+    dbg('qend', qe.questionIndex, qe.correctChoices, qe.isCorrect);
     mirrorState.status = 'questionEnd';
     const idx = Math.max(0, qIndex - 1);
-    const correct = Array.isArray(qe.correctChoices) ? qe.correctChoices : null;
+    const correct = Array.isArray(qe.correctChoices) ? qe.correctChoices : (Array.isArray(qe.correct) ? qe.correct : (_rawCorrect[idx] || null));
     if (correct) {
       mirrorState.correct = correct; mirrorState.source = 'questionEnd';
       console.log(color(`  [+] Correct answers for Q${idx + 1}: ${correct.join(',')}`, 'green'));
