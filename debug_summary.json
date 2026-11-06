@@ -1,5 +1,5 @@
 {
-  "generatedAt": "2026-11-06T12:56:27.597Z",
+  "generatedAt": "2026-11-06T12:56:42.390Z",
   "pin": null,
   "quizUuid": null,
   "challengeId": null,
@@ -9,7 +9,7 @@
   "answerKey": null,
   "rawCorrect": null,
   "mirrorState": {
-    "status": "join-failed",
+    "status": "disconnected",
     "mode": "auto/1",
     "pin": "123456",
     "question": "",
