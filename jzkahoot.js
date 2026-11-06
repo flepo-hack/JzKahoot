@@ -69,7 +69,7 @@ function enableRawExit() {
     else if (b.indexOf('3') !== -1) leaveAll('Leaver (3)');
     else if (b === '\u0003') exitAll();
   });
-  console.log(color('  [*] Controls: Q = quit, 3 = leave bots' + (JZ_DEBUG?' (debug on)':''), 'gray'));
+  console.log(color('  [*] Controls: Q = quit, 3 = leave bots' + (JZ_DEBUG?' (debug on)':'') + (JZ_RAWLOG?' (raw log on)':''), 'gray'));
 }
 
 // ---------- exit handling ----------
@@ -90,8 +90,32 @@ function exitAll() {
 }
 
 // ---------- helpers ----------
-const JZ_DEBUG = !!process.env.JZ_DEBUG;
-function dbg(...a){ if(JZ_DEBUG) try{ console.log(color('  [dbg] '+a.map(x=>typeof x==='string'?x:JSON.stringify(x)).join(' '),'gray')); }catch(e){} }
+const JZ_DEBUG = !!(process.env.JZ_DEBUG || process.argv.includes('--debug') || process.argv.includes('--rawlog'));
+const JZ_RAWLOG = process.env.JZ_RAWLOG || (JZ_DEBUG ? path.join(os.homedir(), '.jzkahoot_rawlog.jsonl') : '');
+let _rawLogStream = null;
+function rawLogOpen() {
+  if (!JZ_RAWLOG || _rawLogStream) return;
+  try {
+    const p = (JZ_RAWLOG === '1' || JZ_RAWLOG === 'true') ? path.join(os.homedir(), '.jzkahoot_rawlog.jsonl') : JZ_RAWLOG;
+    _rawLogStream = fs.createWriteStream(p, { flags: 'a' });
+    console.log(color('  [*] RAW LOG enabled (all Kahoot traffic): ' + p, 'cyan'));
+  } catch(e) { console.log(color('  [!] Raw log open failed: ' + e.message, 'yellow')); }
+}
+function safeJson(v, depth) {
+  depth = depth || 0; if (depth > 6) return '[depth]';
+  const seen = new WeakSet();
+  try { return JSON.parse(JSON.stringify(v, function(k,val){ if(val && typeof val==='object'){ if(seen.has(val)) return '[circular]'; seen.add(val); } if(typeof val==='function') return '[fn '+(val.name||'')+']'; if(val instanceof Buffer) return '[buf '+val.length+']'; return val; })); }
+  catch(e){ try { return String(v).slice(0, 4000); } catch(e2){ return '[unserializable]'; } }
+}
+function rawLog(type, data) {
+  if (!JZ_RAWLOG) return;
+  rawLogOpen();
+  try {
+    const rec = JSON.stringify({ t: new Date().toISOString(), type, data: safeJson(data) }) + '\n';
+    if (_rawLogStream) _rawLogStream.write(rec);
+  } catch(e){}
+}
+function dbg(...a){ if(JZ_DEBUG) try{ const msg=a.map(x=>typeof x==='string'?x:JSON.stringify(x)).join(' '); console.log(color('  [dbg] '+msg,'gray')); rawLog('dbg',{msg}); }catch(e){} }
 function extractMeta(obj, meta, key) {
   meta = meta || { uuids: [], titles: [], hosts: [], media: [] };
   key = (key || '').toLowerCase();
@@ -220,7 +244,7 @@ async function findPublicMatches(questionCount, firstChoiceCount, firstCorrect, 
   if (hints.title) addQ(hints.title);
   if (hints.host) addQ(hints.host);
   if (firstQuestionText) {
-    const words = String(firstQuestionText).trim().split(/s+/);
+    const words = String(firstQuestionText).trim().split(/\s+/);
     addQ(words.slice(0, 8).join(' '));
     if (words.length > 4) addQ(words.slice(0, 4).join(' '));
   }
@@ -292,16 +316,19 @@ async function findPublicMatches(questionCount, firstChoiceCount, firstCorrect, 
   return candidates;
 }
 
+function _normAns(v) {
+  if (v == null) return null;
+  if (Array.isArray(v)) { const a = [...v].map(Number).filter(n=>!isNaN(n)).sort((x,y)=>x-y); return a.length===1?a[0]:a; }
+  const n = Number(v); return isNaN(n) ? v : n;
+}
+function _ansEq(a,b) { a=_normAns(a); b=_normAns(b); return JSON.stringify(a)===JSON.stringify(b); }
 function matchQ(quiz, idx, choiceCount, correct) {
-  const q = quiz[idx];
+  const q = quiz && quiz[idx];
   if (!q || !Array.isArray(q.choices)) return false;
   if (choiceCount && q.choices.length !== choiceCount) return false;
   const idxs = q.choices.map((c, i) => (c && c.correct) ? i : -1).filter(i => i >= 0);
   if (idxs.length === 0) return false;
-  const norm = (idxs.length === 1) ? idxs[0] : idxs;
-  const want = (Array.isArray(correct) && correct.length === 1) ? correct[0] : correct;
-  if (Array.isArray(norm) && Array.isArray(want)) return JSON.stringify(norm) === JSON.stringify(want);
-  return norm === want;
+  return _ansEq(idxs, correct);
 }
 
 const MEMORY_FILE = path.join(os.homedir(), '.jzkahoot_memory.json');
@@ -400,7 +427,7 @@ function banner() {
   console.log(color('   /  / \\ ) (  ) )    (\\__ \\( (__  )(__)( \\__ \\\\__ \\', 'cyan'));
   console.log(color('  (__) (__(____/ )_/\\_( (___/ \\___)(______)(___/( (___', 'cyan'));
   console.log(color('        JZ KAHOOT BOT  -  V3.5  -  TERMUX', 'magenta'));
-  console.log(color('  Auto+Flooder+Leaver | Shift+Q=quit | 3=leave bots mid-run', 'gray'));
+  console.log(color('  Auto+Flooder+Leaver | Q=quit | 3=leave bots | --debug | JZ_RAWLOG=1 for full raw log', 'gray'));
   console.log('');
 }
 
@@ -536,9 +563,23 @@ async function runAutoAnswer() {
   let candidatePos = 0;
   let firstQuestionText = null;
   let _rawCorrect = [];
+  try { rawLog('client.challengeData', client.challengeData); } catch(e){}
+  try { rawLog('client.quiz', client.quiz); } catch(e){}
+  try { rawLog('client.defaults', client.defaults); } catch(e){}
 
   const client = new Kahoot();
   registerClient(client);
+  try {
+    if (typeof client._send === 'function') {
+      const _origSend = client._send.bind(client);
+      client._send = function(payload) { try { rawLog('ws-send', payload); } catch(e){} return _origSend(payload); };
+    }
+    if (client.socket && typeof client.socket.send === 'function') {
+      const _os = client.socket.send.bind(client.socket);
+      client.socket.send = function(d) { try { rawLog('socket-send', d); } catch(e){} return _os(d); };
+    }
+  } catch(e){}
+
 
   // challenge mode...
   try {
@@ -548,65 +589,91 @@ async function runAutoAnswer() {
 
   let leakedTitle = null;
   let leakedHost = null;
+  try {
+    const origSend = client._send && client._send.bind(client);
+    if (origSend) client._send = function(payload){ try { rawLog('ws.send', payload); } catch(e){} return origSend(payload); };
+  } catch(e){}
+  try {
+    const origSend2 = client.send && client.send.bind(client);
+    if (origSend2 && client.send !== client.answer) client.send = function(payload){ try { rawLog('ws.send2', payload); } catch(e){} return origSend2(payload); };
+  } catch(e){}
   const origMessage = client._message.bind(client);
   client._message = function (msg) {
-    try {
-      const p=JSON.parse(msg); const arr=Array.isArray(p)?p:[p];
-      arr.forEach(m=>{
-        if (JZ_DEBUG && m && m.channel) dbg('ws', m.channel, m.data&&m.data.id, m.data&&m.data.type);
-        try {
-          if (m && m.data && m.data.content) {
-            const c = JSON.parse(m.data.content);
-            // id 8 = QuestionEnd in some mappings; id 2/1 question start/ready - fallback handled by lib, but capture correctChoices if present
-            if (Array.isArray(c.correctChoices) && typeof c.questionIndex === 'number') {
-              // stash for handler
-              if (!Array.isArray(_rawCorrect)) _rawCorrect = [];
-              _rawCorrect[c.questionIndex] = c.correctChoices;
-            }
-          }
-        } catch(e){}
-      });
-    } catch(e){}
+    // RAW LOG: capture absolutely everything Kahoot sends (all channels/ids/content) for analysis
     try {
       const parsed = JSON.parse(msg);
       const arr = Array.isArray(parsed) ? parsed : [parsed];
-      for (const m of arr) {
-        // capture question/title text if present in any content
+      arr.forEach(m => {
+        let contentParsed = null;
+        try { if (m && m.data && typeof m.data.content === 'string') contentParsed = JSON.parse(m.data.content); } catch(e){}
+        rawLog('ws', {
+          channel: m && m.channel,
+          id: m && m.data && m.data.id,
+          type: m && m.data && m.data.type,
+          gameid: m && m.data && m.data.gameid,
+          cid: m && m.data && m.data.cid,
+          host: m && m.data && m.data.host,
+          clientId: m && m.clientId,
+          successful: m && m.successful,
+          advice: m && m.advice,
+          ext: m && m.ext,
+          subscription: m && m.subscription,
+          data: m && m.data,
+          content: contentParsed,
+          raw: m
+        });
+        if (JZ_DEBUG) dbg('ws', m && m.channel, m && m.data && m.data.id, m && m.data && m.data.type, contentParsed && contentParsed.questionIndex);
         try {
-          if (m && m.data && m.data.content) {
-            const c = JSON.parse(m.data.content);
-            if (c && (c.title || c.question) && (c.questionIndex === 0 || !firstQuestionText)) {
-              if (!firstQuestionText) firstQuestionText = c.title || c.question;
+          if (contentParsed) {
+            if (Array.isArray(contentParsed.correctChoices) && typeof contentParsed.questionIndex === 'number') {
+              _rawCorrect[contentParsed.questionIndex] = contentParsed.correctChoices;
             }
-            if (c && c.quizTitle && !leakedTitle) leakedTitle = c.quizTitle;
-            if (c && c.hostId && !leakedHost) leakedHost = c.hostId;
+            const qt = contentParsed.title || contentParsed.question || contentParsed.questionText || contentParsed.stem;
+            if (qt && !firstQuestionText && (contentParsed.questionIndex === 0 || contentParsed.gameBlockIndex === 0 || contentParsed.questionIndex == null)) firstQuestionText = qt;
+            if (qt && typeof contentParsed.questionIndex === 'number') { try { mirrorState.question = String(qt); } catch(e){} }
+            const ch = contentParsed.choices || contentParsed.answers;
+            if (Array.isArray(ch) && ch.length && !mirrorState.choices.length) {
+              try { mirrorState.choices = ch.map(x=> typeof x==='string'?x : (x&&(x.answer||x.text||x.choice||''))||''); } catch(e){}
+            }
+            if (contentParsed.quizTitle && !leakedTitle) leakedTitle = contentParsed.quizTitle;
+            if (contentParsed.quizName && !leakedTitle) leakedTitle = contentParsed.quizName;
+            if (contentParsed.name && /quiz/i.test(String(m&&m.channel||'')) && !leakedTitle) leakedTitle = contentParsed.name;
+            if (contentParsed.hostId && !leakedHost) leakedHost = contentParsed.hostId;
+            if (contentParsed.creator && !leakedHost) leakedHost = contentParsed.creator;
+            if (contentParsed.quiz && contentParsed.quiz.uuid) tryLoadUuid(contentParsed.quiz.uuid, 'content.quiz');
+            if (contentParsed.uuid && /quiz|kahoot/i.test(JSON.stringify(contentParsed).slice(0,200))) tryLoadUuid(contentParsed.uuid, 'content.uuid');
+            // quizId in getReady/start payloads
+            if (contentParsed.quizId) tryLoadUuid(contentParsed.quizId, 'content.quizId');
+            if (contentParsed.kahootId) tryLoadUuid(contentParsed.kahootId, 'content.kahootId');
           }
-        } catch (e) {}
-        const meta = extractMeta(m);
-        if (meta.titles.length && !leakedTitle) leakedTitle = meta.titles[0];
-        if (meta.hosts.length && !leakedHost) leakedHost = meta.hosts[0];
-        for (const u of meta.uuids) {
-          if (quizUuid) continue;
-          // try fetching; validate against quizQuestionAnswers length when known
-          fetchAnswers(u).then(k => {
-            if (!k || !Array.isArray(k)) return;
-            const expected = (client.quiz && Array.isArray(client.quiz.quizQuestionAnswers)) ? client.quiz.quizQuestionAnswers.length : null;
-            if (expected && k.length !== expected) return;
-            if (!answerKey) {
-              quizUuid = u;
-              answerKey = k;
-              console.log(color(`  [+] Sniffed UUID (${u}) - answers loaded (${k.length})`, 'green'));
-            }
-          }).catch(() => {});
-        }
-      }
-    } catch (e) {}
+        } catch(e){}
+        try {
+          const meta = extractMeta(m);
+          if (meta.titles.length && !leakedTitle) leakedTitle = meta.titles[0];
+          if (meta.hosts.length && !leakedHost) leakedHost = meta.hosts[0];
+          for (const u of meta.uuids) {
+            if (quizUuid) continue;
+            fetchAnswers(u).then(k => {
+              if (!k || !Array.isArray(k)) return;
+              const expected = (client.quiz && Array.isArray(client.quiz.quizQuestionAnswers)) ? client.quiz.quizQuestionAnswers.length : null;
+              if (expected && k.length !== expected) return;
+              if (!answerKey) { quizUuid = u; answerKey = k; console.log(color(`  [+] Sniffed UUID (${u}) - answers loaded (${k.length})`, 'green')); }
+            }).catch(() => {});
+          }
+        } catch(e){}
+      });
+    } catch(e) { rawLog('ws-raw', { msg: String(msg).slice(0,20000), err: e&&e.message }); }
     return origMessage(msg);
   };
 
-  client.on('Joined', (settings) => {
+
+  for (const ev of ['GameReset','QuestionReady','QuestionAnswer','NameAccept','TeamAccept','Feedback','TimeUp','TimeOver','Podium','RecoveryData','TwoFactorWrong','TwoFactorRight','TwoFactorReset','questionStart','questionEnd','quizStart','quizEnd','gameReset','timeUp','feedback','getReady','GetReady']) {
+    try { client.on(ev, (d) => rawLog('event:'+ev, d)); } catch(e){}
+  }
+
+  client.on('Joined', (settings) => { rawLog('event:Joined', settings);
     console.log(color('  [+] Joined game. Waiting for start...', 'green'));
-    mirrorState.status = 'joined'; try { brainLearn({ pin: pin, session: { mode: 'auto', name: name, joined: true } }); } catch(e) {}
+    mirrorState.status = 'joined'; try { rawLog('post-join:challengeData', client.challengeData); rawLog('post-join:quiz', client.quiz); rawLog('post-join:settings', settings); } catch(e){} try { brainLearn({ pin: pin, session: { mode: 'auto', name: name, joined: true } }); } catch(e) {}
     // harvest leaked metadata from session/settings
     try {
       const meta = extractMeta(settings);
@@ -645,7 +712,7 @@ async function runAutoAnswer() {
     }).catch(()=>{});
   }
 
-  client.on('QuizStart', (quiz) => {
+  client.on('QuizStart', (quiz) => { rawLog('event:QuizStart', quiz);
     console.log(color('  [*] Quiz started.', 'cyan'));
     try {
       if (quiz && (quiz.name || quiz.quizName || quiz.title) && !leakedTitle) leakedTitle = quiz.name || quiz.quizName || quiz.title;
@@ -716,7 +783,7 @@ async function runAutoAnswer() {
   }
 
   let qIndex = 0;
-  async function handleQuestionStart(question) {
+  async function handleQuestionStart(question) { rawLog('event:QuestionStart', question);
     question = question || {};
     const qi = (typeof question.questionIndex === 'number') ? question.questionIndex : (typeof question.index === 'number' ? question.index : qIndex);
     qIndex = qi;
@@ -763,7 +830,7 @@ async function runAutoAnswer() {
               const correctTexts = (cq.choices||[]).filter(c=>c&&c.correct).map(c=>String(c.answer||c.text||'').toLowerCase().replace(/[^a-z0-9]+/g,' ').trim()).filter(Boolean);
               if (!correctTexts.length || !Array.isArray(question.choices)) continue;
               const idxs = question.choices.map((c,i)=>({i,t:String(c&&(c.answer||c.text||c)||'').toLowerCase().replace(/[^a-z0-9]+/g,' ').trim()})).filter(x=>correctTexts.some(ct=>ct===x.t||similarity(ct,x.t)>0.86)).map(x=>x.i);
-              if (idxs.length) return { ans: (idxs.length===1?idxs[0]:idxs), uuid: cand.__uuid, title: null };
+              if (idxs.length) return { ans: (idxs.length===1?idxs[0]:idxs), uuid: cand.__uuid, title: null, _cand: cand };
             }
           }
           return null;
@@ -791,7 +858,7 @@ async function runAutoAnswer() {
             const fr = await Promise.race([fastResolve, sleep(Math.max(1, Math.min(8, delay/1000))).then(()=>null)]);
             if (fr && fr.ans != null) {
               answerToSend = fr.ans; know = true; mirrorState.source = 'public-text-match';
-              if (fr.uuid) quizUuid = quizUuid || fr.uuid;
+              if (fr.uuid) { quizUuid = quizUuid || fr.uuid; try { if(!answerKey && fr._cand){ answerKey = fr._cand; } } catch(e){} }
               console.log(color('  [+] Resolved by public text/structure match: ' + JSON.stringify(answerToSend), 'green'));
             }
           } catch(e){}
@@ -809,7 +876,7 @@ async function runAutoAnswer() {
   try { client.on('QuestionReady', (q)=>{ dbg('QuestionReady', q&&q.questionIndex); if (q && Array.isArray(q.quizQuestionAnswers) && client.quiz) client.quiz.quizQuestionAnswers = q.quizQuestionAnswers; }); } catch(e){}
   try { client.on('GetReady', (q)=>dbg('GetReady')); } catch(e){}
 
-  async function handleQuestionEnd(qe) {
+  async function handleQuestionEnd(qe) { rawLog('event:QuestionEnd', qe);
     qe = qe || {};
     try { if (qe.content && typeof qe.content === 'string') qe = Object.assign({}, qe, JSON.parse(qe.content)); } catch(e){}
     dbg('qend', qe.questionIndex, qe.correctChoices, qe.isCorrect);
@@ -878,25 +945,26 @@ async function runAutoAnswer() {
         }
       }
 
-      // Refinement: if Q2 answer mismatches, try next candidate
+      // Refinement: if Q2 mismatches, try next candidate (index or correct-text match for randomized order)
       if (idx === 1 && Array.isArray(publicCandidates) && publicCandidates.length > 1) {
-        const predicted = (Array.isArray(answerKey) && answerKey[1] && Array.isArray(answerKey[1].choices)) ? answerKey[1].choices.map((c,i)=>c.correct?i:-1).filter(i=>i>=0) : null;
+        const predicted = (Array.isArray(answerKey) && answerKey[1] && Array.isArray(answerKey[1].choices)) ? answerKey[1].choices.map((c,i)=>c&&c.correct?i:-1).filter(i=>i>=0) : null;
         const actual = correct;
-        let predictedNorm = (predicted && predicted.length === 1) ? predicted[0] : predicted;
-        let actualNorm = (actual.length === 1) ? actual[0] : actual;
-        if (predictedNorm !== null && JSON.stringify(predictedNorm) !== JSON.stringify(actualNorm)) {
-          // find next match that also fits Q2
+        const mismatch = predicted != null && !_ansEq(predicted, actual);
+        if (mismatch) {
           let found = false;
+          const liveCorrectTexts = (mirrorState.choices||[]).filter((_,i)=> (Array.isArray(actual)?actual:[actual]).includes(i)).map(t=>String(t||'').toLowerCase().replace(/[^a-z0-9]+/g,' ').trim()).filter(Boolean);
           for (let i = candidatePos + 1; i < publicCandidates.length; i++) {
             const cand = publicCandidates[i];
             if (!cand || !cand[1] || !Array.isArray(cand[1].choices)) continue;
             const cIdxs = cand[1].choices.map((c, j) => (c && c.correct) ? j : -1).filter(j => j >= 0);
-            const cNorm = (cIdxs.length === 1) ? cIdxs[0] : cIdxs;
-            if (JSON.stringify(cNorm) === JSON.stringify(actualNorm)) {
-              candidatePos = i;
-              answerKey = cand;
-              found = true;
-              console.log(color(`  [+] Refined: switched to match #${i + 1}.`, 'green'));
+            let ok = _ansEq(cIdxs, actual);
+            if (!ok && liveCorrectTexts.length) {
+              const candTexts = cand[1].choices.filter(c=>c&&c.correct).map(c=>String(c.answer||c.text||'').toLowerCase().replace(/[^a-z0-9]+/g,' ').trim());
+              ok = JSON.stringify(candTexts.sort()) === JSON.stringify(liveCorrectTexts.sort());
+            }
+            if (ok) {
+              candidatePos = i; answerKey = cand; found = true;
+              console.log(color(`  [+] Refined: switched to match #${i + 1} (randomized-order aware).`, 'green'));
               break;
             }
           }
@@ -908,9 +976,10 @@ async function runAutoAnswer() {
   client.on('QuestionEnd', handleQuestionEnd);
   try { client.on('questionEnd', handleQuestionEnd); } catch(e){}
   try { client.on('RevealAnswer', handleQuestionEnd); } catch(e){}
-  client.on('QuizEnd', () => { mirrorState.status = 'ended'; mirrorState.source='ended'; console.log(color('  [+] Quiz ended. Shift+Q to quit.', 'cyan')); try { brainLearn({ pin: pin, session: { ended: true, uuid: quizUuid || null, title: leakedTitle||null } }); if (quizUuid && Array.isArray(answerKey)) brainLearn({ uuid: quizUuid, quiz: answerKey, title: leakedTitle }); } catch(e) {} });
+  client.on('QuizEnd', (ev) => { rawLog('event:QuizEnd', ev); mirrorState.status = 'ended'; mirrorState.source='ended'; console.log(color('  [+] Quiz ended. Shift+Q to quit.', 'cyan')); try { brainLearn({ pin: pin, session: { ended: true, uuid: quizUuid || null, title: leakedTitle||null } }); if (quizUuid && Array.isArray(answerKey)) brainLearn({ uuid: quizUuid, quiz: answerKey, title: leakedTitle }); } catch(e) {} });
+  client.on('TwoFactorReset', (ev)=>{ rawLog('event:TwoFactorReset', ev); });
   client.on('TwoFactorReset', () => { console.log(color('  [!] 2FA required (host code) - bot cannot answer automatically', 'yellow')); });
-  client.on('Disconnect', (reason) => { mirrorState.status='disconnected'; console.log(color('  [-] Disconnected: ' + (reason||'unknown'), 'red')); console.log(color('  [*] Shift+Q = quit, or wait/restart from menu if you rerun.', 'gray')); });
+  client.on('Disconnect', (reason) => { rawLog('event:Disconnect', reason); mirrorState.status='disconnected'; console.log(color('  [-] Disconnected: ' + (reason||'unknown'), 'red')); console.log(color('  [*] Shift+Q = quit, or wait/restart from menu if you rerun.', 'gray')); });
 
   // If we only have a challenge/UUID (no live PIN join useful) but got answers, show them
   const canJoinLive = /^\d{4,10}$/.test(String(pin||''));
