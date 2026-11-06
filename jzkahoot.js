@@ -195,50 +195,6 @@ function httpGetJson(url, timeout) {
   });
 }
 
-function openAIAnswer(apiKey, model, questionText, choices) {
-  return new Promise((resolve) => {
-    const body = JSON.stringify({
-      model: model || 'gpt-4o-mini',
-      messages: [
-        { role: 'system', content: 'You answer multiple-choice quiz questions. Reply with only the 0-based index of the correct option. For multiple correct, return comma-separated indices.' },
-        { role: 'user', content: `Question: ${questionText}\nOptions:\n${choices.map((c, i) => i + ': ' + c).join('\n')}` }
-      ],
-      temperature: 0,
-      max_tokens: 20
-    });
-    const req = https.request({
-      hostname: 'api.openai.com',
-      path: '/v1/chat/completions',
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': 'Bearer ' + apiKey,
-        'Content-Length': Buffer.byteLength(body)
-      },
-      timeout: 8000
-    }, (res) => {
-      let data = '';
-      res.on('data', c => data += c);
-      res.on('end', () => {
-        try {
-          const j = JSON.parse(data);
-          const txt = (j.choices && j.choices[0] && j.choices[0].message && j.choices[0].message.content) || '';
-          const nums = txt.match(/\d+/g);
-          if (nums && nums.length) {
-            const idxs = nums.map(n => parseInt(n, 10)).filter(n => n >= 0 && n < choices.length);
-            if (idxs.length === 1) resolve(idxs[0]);
-            else if (idxs.length > 1) resolve(idxs);
-            else resolve(null);
-          } else resolve(null);
-        } catch (e) { resolve(null); }
-      });
-    });
-    req.on('error', () => resolve(null));
-    req.on('timeout', () => { req.destroy(); resolve(null); });
-    req.write(body);
-    req.end();
-  });
-}
 
 async function findPublicMatches(questionCount, firstChoiceCount, firstCorrect, firstQuestionText, hints) {
   hints = hints || {};
@@ -743,72 +699,100 @@ async function runAutoAnswer() {
   }
 
   let qIndex = 0;
-  client.on('QuestionStart', async (question) => {
-    const qi = (typeof question.questionIndex === 'number') ? question.questionIndex : qIndex;
+  async function handleQuestionStart(question) {
+    question = question || {};
+    const qi = (typeof question.questionIndex === 'number') ? question.questionIndex : (typeof question.index === 'number' ? question.index : qIndex);
     qIndex = qi;
-    if (qi === 0) firstQuestionText = question.title || question.question || question.text || firstQuestionText;
-    console.log(color(`\\n  [!] Question ${qi + 1} started`, 'yellow'));
+    const liveText = question.title || question.question || question.text || question.questionText || '';
+    if (qi === 0 && liveText) firstQuestionText = liveText;
+    console.log(color(`\n  [!] Question ${qi + 1} started`, 'yellow'));
+    dbg('qstart', qi, question.type, liveText ? String(liveText).slice(0,60) : '');
 
     let choiceCount = 4;
     if (Array.isArray(question.choices)) choiceCount = question.choices.length;
     else if (client.quiz && Array.isArray(client.quiz.quizQuestionAnswers)) choiceCount = client.quiz.quizQuestionAnswers[qi] || choiceCount;
     else if (Array.isArray(question.quizQuestionAnswers)) choiceCount = question.quizQuestionAnswers[qi] || choiceCount;
 
-    const qData = (Array.isArray(answerKey) ? answerKey[qi] : null);
-    if (!qData && Array.isArray(question.choices) && question.choices.some(c => c && c.correct)) {
-      // Kahoot leaked correct answers with question
-      answerKey = [question];
+    let qData2 = (Array.isArray(answerKey) ? answerKey[qi] : null);
+    if (!qData2 && Array.isArray(answerKey) && liveText) {
+      const n = liveText.toLowerCase().replace(/[^a-z0-9]+/g,' ').trim();
+      qData2 = answerKey.find(q => q && q.question && similarity(n, String(q.question).toLowerCase().replace(/[^a-z0-9]+/g,' ').trim()) > 0.72) || null;
     }
-    const qData2 = (Array.isArray(answerKey) ? answerKey[qi] : null);
-    let answerToSend;
-    let know = false;
-    let wrong = false;
+    if (!qData2 && liveText && _brain && Array.isArray(_brain.questions)) {
+      const n = liveText.toLowerCase().replace(/[^a-z0-9]+/g,' ').trim();
+      const hit = [..._brain.questions].reverse().find(x => x && x.text && similarity(n, String(x.text).toLowerCase().replace(/[^a-z0-9]+/g,' ').trim()) > 0.78);
+      if (hit && Array.isArray(hit.correct)) { qData2 = { type: question.type||'quiz', choices: Array.from({length:choiceCount},(_,i)=>({correct: hit.correct.includes(i)})), question: hit.text }; }
+    }
+    if (!qData2 && Array.isArray(question.choices) && question.choices.some(c => c && c.correct)) {
+      answerKey = [question]; qData2 = question;
+    }
     let r = computeAnswer(qData2, mode, choiceCount);
-    answerToSend = r.answerToSend; know = r.know; wrong = r.wrong;
-    // real-time AI fallback when question+choices are on the device and answer unknown
-    if (!know && process.env.OPENAI_API_KEY) {
-      try {
-        const qText = question.title || question.question || question.text || (qData2 && (qData2.question||qData2.title)) || '';
-        const ch = Array.isArray(question.choices) ? question.choices.map(c=>c && (c.answer||c.text||c)||'') : (Array.isArray(qData2&&qData2.choices)?qData2.choices.map(c=>c.answer||''):[]);
-        if (qText && ch.length) {
-          mirrorState.source = 'ai-solving';
-          const ai = await Promise.race([aiSolve(qText, ch, question.type || (qData2&&qData2.type)), sleep(10).then(()=>null)]);
-          if (ai !== null && ai !== undefined) { answerToSend = ai; know = true; r.know = true; console.log(color('  [+] AI answer (device-visible question): ' + JSON.stringify(ai), 'green')); }
-        }
-      } catch(e){}
+    let answerToSend = r.answerToSend, know = r.know, wrong = r.wrong;
+
+    // fast narrow-by-text+structure (public catalog). Helps when questions/answers randomized or private copy of public quiz.
+    let fastResolve = null;
+    if (!know && liveText) {
+      const qCount = (client.quiz && Array.isArray(client.quiz.quizQuestionAnswers)) ? client.quiz.quizQuestionAnswers.length : null;
+      const cc = (client.quiz && Array.isArray(client.quiz.quizQuestionAnswers)) ? client.quiz.quizQuestionAnswers : null;
+      fastResolve = findPublicMatches(qCount || (qi+5), choiceCount, null, liveText, { title: leakedTitle, host: leakedHost, choiceCounts: cc, choiceTexts: Array.isArray(question.choices)?question.choices.map(c=>c&&(c.answer||c.text||c)||''):[] })
+        .then(matches => {
+          if (!matches || !matches.length) return null;
+          // find a question in matches whose text matches and map correct choice text to live choice index
+          for (const cand of matches) {
+            if (!Array.isArray(cand)) continue;
+            for (const cq of cand) {
+              if (!cq || !cq.question) continue;
+              if (similarity(liveText.toLowerCase().replace(/[^a-z0-9]+/g,' ').trim(), String(cq.question).toLowerCase().replace(/[^a-z0-9]+/g,' ').trim()) < 0.72) continue;
+              const correctTexts = (cq.choices||[]).filter(c=>c&&c.correct).map(c=>String(c.answer||c.text||'').toLowerCase().replace(/[^a-z0-9]+/g,' ').trim()).filter(Boolean);
+              if (!correctTexts.length || !Array.isArray(question.choices)) continue;
+              const idxs = question.choices.map((c,i)=>({i,t:String(c&&(c.answer||c.text||c)||'').toLowerCase().replace(/[^a-z0-9]+/g,' ').trim()})).filter(x=>correctTexts.some(ct=>ct===x.t||similarity(ct,x.t)>0.86)).map(x=>x.i);
+              if (idxs.length) return { ans: (idxs.length===1?idxs[0]:idxs), uuid: cand.__uuid, title: null };
+            }
+          }
+          return null;
+        }).catch(()=>null);
     }
     if (wrong) console.log(color('  [*] Non-suspicious: intentional miss', 'gray'));
-    else if (know) console.log(color('  [*] Answering correctly' + (mirrorState.source==='ai-solving'?' (AI)':''), 'gray'));
-    else console.log(color('  [*] Answer unknown now; will learn from QuestionEnd (private/projector case)', 'gray'));
+    else if (know) console.log(color('  [*] Answering correctly', 'gray'));
+    else console.log(color('  [*] Not known pre-answer (private/randomized/no public match). Guessing now; correct answer will be learned at QuestionEnd.', 'gray'));
 
-    let delay = 1000;
-    if (mode === '1') delay = 300 + Math.floor(Math.random() * 500);
-    else delay = 900 + Math.floor(Math.random() * 300);
-
-    // overlay update
+    let delay = mode === '1' ? (300 + Math.floor(Math.random() * 500)) : (900 + Math.floor(Math.random() * 300));
     try {
       mirrorState.status = 'question';
-      mirrorState.question = (qData2 && (qData2.question || qData2.title)) || `Question ${qi + 1}`;
-      mirrorState.source = know ? (mirrorState.source==='ai-solving'?'ai':(quizUuid ? 'brain/rest/uuid' : 'known')) : 'guess->questionEnd';
-      mirrorState.choices = Array.isArray(qData2 && qData2.choices) ? qData2.choices.map(c => c.answer || '') : Array.from({length: choiceCount}, (_,i)=>`Option ${i}`);
-      mirrorState.selected = null;
-      mirrorState.correct = null;
-      mirrorState.qi = qi; mirrorState.questionIndex = qi;
+      mirrorState.question = liveText || (qData2 && (qData2.question || qData2.title)) || `Question ${qi + 1}`;
+      mirrorState.source = know ? (quizUuid ? 'brain/rest/uuid' : 'known') : 'guess->learn@QuestionEnd';
+      const liveChoices = Array.isArray(question.choices) ? question.choices.map(c=>c&&(c.answer||c.text||String(c))||'') : null;
+      const keyChoices = Array.isArray(qData2 && qData2.choices) ? qData2.choices.map(c => c&&(c.answer||c.text||'')||'') : null;
+      mirrorState.choices = liveChoices && liveChoices.length ? liveChoices : (keyChoices && keyChoices.length ? keyChoices : Array.from({length: choiceCount}, (_,i)=>`Option ${i}`));
+      mirrorState.selected = null; mirrorState.correct = null; mirrorState.qi = qi; mirrorState.questionIndex = qi;
     } catch (e) {}
 
-    setTimeout(() => {
+    setTimeout(async () => {
       try {
-        console.log(color(`  [+] Sending answer: ${Array.isArray(answerToSend) ? answerToSend.join(',') : answerToSend} (delay ${delay}ms)`, 'green'));
+        if (!know && fastResolve) {
+          try {
+            const fr = await Promise.race([fastResolve, sleep(Math.max(1, Math.min(8, delay/1000))).then(()=>null)]);
+            if (fr && fr.ans != null) {
+              answerToSend = fr.ans; know = true; mirrorState.source = 'public-text-match';
+              if (fr.uuid) quizUuid = quizUuid || fr.uuid;
+              console.log(color('  [+] Resolved by public text/structure match: ' + JSON.stringify(answerToSend), 'green'));
+            }
+          } catch(e){}
+        }
+        console.log(color(`  [+] Sending: ${Array.isArray(answerToSend)?answerToSend.join(','):answerToSend} (delay ${delay}ms)`, 'green'));
         mirrorState.selected = answerToSend;
-        question.answer(answerToSend);
-      } catch (e) {
-        try { client.answer(answerToSend); } catch (e2) {}
-      }
-      qIndex++;
+        if (question && typeof question.answer === 'function') question.answer(answerToSend);
+        else client.answer(answerToSend);
+      } catch (e) { try { client.answer(answerToSend); } catch(e2){} }
+      qIndex = Math.max(qIndex, qi + 1);
     }, delay);
-  });
+  }
+  client.on('QuestionStart', handleQuestionStart);
+  try { client.on('questionStart', handleQuestionStart); } catch(e){}
+  try { client.on('QuestionReady', (q)=>dbg('QuestionReady', q&&q.questionIndex)); } catch(e){}
 
-  client.on('QuestionEnd', async (qe) => {
+  async function handleQuestionEnd(qe) {
+    qe = qe || {};
     mirrorState.status = 'questionEnd';
     const idx = Math.max(0, qIndex - 1);
     const correct = Array.isArray(qe.correctChoices) ? qe.correctChoices : null;
@@ -824,7 +808,11 @@ async function runAutoAnswer() {
       q.question = mirrorState.question || q.question;
       answerKey[idx] = q;
       // learn to brain
-      try { brainLearn({ question: { pin: mirrorState.pin, qi: idx, correct, choiceCount: n, text: mirrorState.question } }); } catch (e) {}
+      try {
+        const choiceTexts = (mirrorState.choices||[]).map((t,i)=>({i,t}));
+        const correctTexts = correct.map(i => (mirrorState.choices&&mirrorState.choices[i])||'').filter(Boolean);
+        brainLearn({ question: { pin: mirrorState.pin, qi: idx, correct, correctTexts, choiceTexts: mirrorState.choices||[], choiceCount: n, text: mirrorState.question } });
+      } catch (e) {}
 
       // Fingerprint search from public templates (after first question)
       if (idx === 0) {
@@ -844,13 +832,13 @@ async function runAutoAnswer() {
         try {
           const pre = structCandidates ? await Promise.race([structCandidates, sleep(2).then(()=>[])]) : [];
           if (Array.isArray(pre) && pre.length) {
-            matches = pre.filter(c => matchQ(c, 0, firstChoiceCount, firstCorrect));
+            matches = pre.filter(c => matchQ(c, 0, firstChoiceCount, firstCorrect, firstQuestionText, mirrorState.choices));
             if (matches.length) console.log(color('  [+] Structure prefetch hit: ' + matches.length + ' ehdokasta', 'green'));
           }
         } catch (e) {}
         // 2) taydennys haulla
         if (matches.length === 0) {
-          matches = await findPublicMatches(qCount, firstChoiceCount, firstCorrect, firstQuestionText, hints);
+          matches = await findPublicMatches(qCount, firstChoiceCount, firstCorrect, firstQuestionText, {...hints, choiceTexts: mirrorState.choices});
         } else {
           // search more in background but don't wait long
           findPublicMatches(qCount, firstChoiceCount, firstCorrect, firstQuestionText, hints).then(extra => {
@@ -896,7 +884,10 @@ async function runAutoAnswer() {
         }
       }
     }
-  });
+  }
+  client.on('QuestionEnd', handleQuestionEnd);
+  try { client.on('questionEnd', handleQuestionEnd); } catch(e){}
+  try { client.on('RevealAnswer', handleQuestionEnd); } catch(e){}
   client.on('QuizEnd', () => { mirrorState.status = 'ended'; mirrorState.source='ended'; console.log(color('  [+] Quiz ended. Shift+Q to quit.', 'cyan')); try { brainLearn({ pin: pin, session: { ended: true, uuid: quizUuid || null, title: leakedTitle||null } }); if (quizUuid && Array.isArray(answerKey)) brainLearn({ uuid: quizUuid, quiz: answerKey, title: leakedTitle }); } catch(e) {} });
   client.on('TwoFactorReset', () => { console.log(color('  [!] 2FA required (host code) - bot cannot answer automatically', 'yellow')); });
   client.on('Disconnect', (reason) => { mirrorState.status='disconnected'; console.log(color('  [-] Disconnected: ' + (reason||'unknown'), 'red')); console.log(color('  [*] Shift+Q = quit, or wait/restart from menu if you rerun.', 'gray')); });
