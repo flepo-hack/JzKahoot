@@ -216,6 +216,25 @@ async function fetchAnswers(uuidOrRef) {
   return null;
 }
 
+function aiSolve(questionText, choices) {
+  const key = process.env.OPENAI_API_KEY || process.env.AI_API_KEY || '';
+  if (!key || !questionText || !choices || !choices.length) return Promise.resolve(null);
+  const model = process.env.AI_MODEL || 'gpt-4o-mini';
+  const body = JSON.stringify({
+    model, temperature: 0, max_tokens: 20,
+    messages: [
+      { role: 'system', content: 'You answer multiple-choice quiz questions. Reply with ONLY the 0-based index of the correct option. For multiple correct, return comma-separated indices like 0,2. For jumble, return 0,1,2,3.' },
+      { role: 'user', content: 'Question: ' + questionText + '\nOptions:\n' + choices.map((c,i)=>i+': '+c).join('\n') }
+    ]
+  });
+  return new Promise((resolve) => {
+    const req = https.request({ hostname: 'api.openai.com', path: '/v1/chat/completions', method: 'POST', headers: { 'Content-Type':'application/json', 'Authorization':'Bearer '+key, 'Content-Length': Buffer.byteLength(body) }, timeout: 10000 }, (res) => {
+      let b=''; res.on('data',d=>b+=d); res.on('end',()=>{ try { const j=JSON.parse(b); const t=((j.choices&&j.choices[0]&&j.choices[0].message&&j.choices[0].message.content)||'').trim(); const m=t.match(/\[[^\]]+\]|-?\d+(?:\s*,\s*-?\d+)*/); if(!m) return resolve(null); const raw=m[0]; let v; try { v=JSON.parse(raw.replace(/'/g,'"')); } catch(e){ v=raw.split(',').map(x=>parseInt(x.trim(),10)).filter(n=>!isNaN(n)); if(v.length===1) v=v[0]; } resolve(v); } catch(e){ resolve(null); } });
+    });
+    req.on('error',()=>resolve(null)); req.on('timeout',()=>{req.destroy(); resolve(null);}); req.write(body); req.end();
+  });
+}
+
 function httpGetJson(url, timeout) {
   return new Promise((resolve, reject) => {
     const req = https.get(url, {
@@ -448,6 +467,7 @@ function banner() {
   console.log(color('  (__) (__(____/ )_/\\_( (___/ \\___)(______)(___/( (___', 'cyan'));
   console.log(color('        JZ KAHOOT BOT  -  V3.5  -  TERMUX', 'magenta'));
   console.log(color('  Auto+Flooder+Leaver | Q=quit | 3=leave bots | ALL Kahoot traffic logged', 'gray'));
+  if (process.env.OPENAI_API_KEY) console.log(color('  [*] AI fallback enabled (OPENAI_API_KEY) for device-visible questions.', 'cyan'));
   console.log('');
 }
 
@@ -844,6 +864,19 @@ async function runAutoAnswer() {
     let r = computeAnswer(qData2, mode, choiceCount);
     let answerToSend = r.answerToSend, know = r.know, wrong = r.wrong;
 
+    // Optional AI fallback (kAIhoot-style): only if OPENAI_API_KEY set AND question+choices visible on device
+    if (!know && process.env.OPENAI_API_KEY) {
+      try {
+        const qText = liveText || (qData2 && (qData2.question || qData2.title)) || '';
+        const ch = Array.isArray(question.choices) ? question.choices.map(c=>c&&(c.answer||c.text||String(c))||'') : (Array.isArray(qData2&&qData2.choices)?qData2.choices.map(c=>c&&(c.answer||c.text||'')||''):[] );
+        if (qText && ch.length) {
+          mirrorState.source = 'ai-solving';
+          const ai = await Promise.race([aiSolve(qText, ch), sleep(8).then(()=>null)]);
+          if (ai !== null && ai !== undefined) { answerToSend = ai; know = true; console.log(color('  [+] AI answer (device-visible question): ' + JSON.stringify(ai), 'green')); }
+        }
+      } catch(e){}
+    }
+
     // fast narrow-by-text+structure (public catalog). Helps when questions/answers randomized or private copy of public quiz.
     let fastResolve = null;
     if (!know && liveText) {
@@ -869,13 +902,13 @@ async function runAutoAnswer() {
     }
     if (wrong) console.log(color('  [*] Non-suspicious: intentional miss', 'gray'));
     else if (know) console.log(color('  [*] Answering correctly', 'gray'));
-    else console.log(color('  [*] Not known pre-answer (private/randomized/no public match). Guessing now; correct answer will be learned at QuestionEnd.', 'gray'));
+    else console.log(color('  [*] Not known pre-answer (private/randomized/no public match). Guessing; will learn from QuestionEnd.', 'gray'));
 
     let delay = mode === '1' ? (300 + Math.floor(Math.random() * 500)) : (900 + Math.floor(Math.random() * 300));
     try {
       mirrorState.status = 'question';
       mirrorState.question = liveText || (qData2 && (qData2.question || qData2.title)) || `Question ${qi + 1}`;
-      mirrorState.source = know ? (quizUuid ? 'brain/rest/uuid' : 'known') : 'guess->learn@QuestionEnd';
+      mirrorState.source = know ? (mirrorState.source==='ai-solving'?'ai':(quizUuid ? 'brain/rest/uuid' : 'known')) : 'guess->learn@QuestionEnd';
       const liveChoices = Array.isArray(question.choices) ? question.choices.map(c=>c&&(c.answer||c.text||String(c))||'') : null;
       const keyChoices = Array.isArray(qData2 && qData2.choices) ? qData2.choices.map(c => c&&(c.answer||c.text||'')||'') : null;
       mirrorState.choices = liveChoices && liveChoices.length ? liveChoices : (keyChoices && keyChoices.length ? keyChoices : Array.from({length: choiceCount}, (_,i)=>`Option ${i}`));
@@ -1038,13 +1071,23 @@ async function runAutoAnswer() {
     console.log(color('  [*] Private live quizzes without a public copy/challenge: answers are learned per question via QuestionEnd.', 'gray'));
   }
   console.log(color(`  [*] Joining game ${pin} as ${name}...`, 'cyan'));
+  let joinResolved = false;
+  const joinTimer = setTimeout(() => {
+    if (!joinResolved) {
+      mirrorState.status='join-timeout';
+      console.log(color('  [-] Join timed out (15s). PIN may be invalid/expired, game ended, or network blocked.', 'red'));
+      console.log(color('  [*] Check: game is live in lobby, PIN correct, Termux has internet. Shift+Q = quit.', 'gray'));
+    }
+  }, 15000);
   joinEvent.then(() => {
+    joinResolved = true; clearTimeout(joinTimer);
     console.log(color('  [+] Joined game. Waiting for host to start...', 'green'));
     mirrorState.status = 'joined';
   }).catch(err => {
+    joinResolved = true; clearTimeout(joinTimer);
     mirrorState.status='join-failed';
     console.log(color('  [-] Join failed: ' + (err && (err.description || err.message || err) || 'unknown'), 'red'));
-    console.log(color('  [*] Check PIN (live game must be open). Shift+Q = quit.', 'gray'));
+    console.log(color('  [*] Check PIN (live game must be open, not ended). Shift+Q = quit.', 'gray'));
   });
 }
 
