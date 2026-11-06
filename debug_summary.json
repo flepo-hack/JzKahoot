@@ -1,5 +1,5 @@
 {
-  "generatedAt": "2026-11-06T12:35:40.760Z",
+  "generatedAt": "2026-11-06T12:52:46.919Z",
   "pin": null,
   "quizUuid": null,
   "challengeId": null,
@@ -9,8 +9,8 @@
   "answerKey": null,
   "rawCorrect": null,
   "mirrorState": {
-    "status": "idle",
-    "mode": "",
+    "status": "join-failed",
+    "mode": "auto/2",
     "pin": "",
     "question": "",
     "choices": [],
@@ -21,7 +21,7 @@
     "joined": 0,
     "source": "",
     "quizTitle": "",
-    "overlayUrl": ""
+    "overlayUrl": "http://127.0.0.1:8080"
   },
   "brainGames": {},
   "brainQuizzes": [],
