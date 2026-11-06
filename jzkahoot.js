@@ -519,9 +519,8 @@ setInterval(tick,450);tick();
     srv.once('error', (e) => { if (e && e.code === 'EADDRINUSE') tryListen(p + 1, tries + 1); });
     srv.listen(p, '127.0.0.1', () => {
       _mirrorSrv = srv; mirrorState.overlayUrl = 'http://127.0.0.1:' + p;
-      console.log(color('  [UI] Overlay (mini): ' + mirrorState.overlayUrl, 'cyan'));
-      console.log(color('  [UI] Tip: open in Chrome, then use split-screen/popup; Termux cannot draw a native floating overlay without extra Android permissions.', 'gray'));
-      // no auto-open browser (user requested); URL printed above for manual open
+      console.log(color('  [UI] Overlay URL: ' + mirrorState.overlayUrl + ' (open manually in browser if needed)', 'cyan'));
+      // no auto-open browser (user requested)
     });
   }
   tryListen(port, 0);
