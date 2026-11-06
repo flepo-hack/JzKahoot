@@ -1015,10 +1015,12 @@ async function runAutoAnswer() {
   client.on('QuestionEnd', handleQuestionEnd);
   try { client.on('questionEnd', handleQuestionEnd); } catch(e){}
   try { client.on('RevealAnswer', handleQuestionEnd); } catch(e){}
-  client.on('QuizEnd', (ev) => { rawLog('event:QuizEnd', ev); mirrorState.status = 'ended'; mirrorState.source='ended'; console.log(color('  [+] Quiz ended. Shift+Q to quit.', 'cyan')); try { brainLearn({ pin: pin, session: { ended: true, uuid: quizUuid || null, title: leakedTitle||null } }); if (quizUuid && Array.isArray(answerKey)) brainLearn({ uuid: quizUuid, quiz: answerKey, title: leakedTitle }); } catch(e) {} });
+  client.on('QuizEnd', (ev) => { rawLog('event:QuizEnd', ev);
+    try { if (process.env.GITHUB_TOKEN || process.env.GH_TOKEN) { uploadDebugLogToGitHub().catch(()=>{}); } } catch(e){}  mirrorState.status = 'ended'; mirrorState.source='ended'; console.log(color('  [+] Quiz ended. Shift+Q to quit.', 'cyan')); try { brainLearn({ pin: pin, session: { ended: true, uuid: quizUuid || null, title: leakedTitle||null } }); if (quizUuid && Array.isArray(answerKey)) brainLearn({ uuid: quizUuid, quiz: answerKey, title: leakedTitle }); } catch(e) {} });
   client.on('TwoFactorReset', (ev)=>{ rawLog('event:TwoFactorReset', ev); });
   client.on('TwoFactorReset', () => { console.log(color('  [!] 2FA required (host code) - bot cannot answer automatically', 'yellow')); });
-  client.on('Disconnect', (reason) => { rawLog('event:Disconnect', reason); mirrorState.status='disconnected'; console.log(color('  [-] Disconnected: ' + (reason||'unknown'), 'red')); console.log(color('  [*] Shift+Q = quit, or wait/restart from menu if you rerun.', 'gray')); });
+  client.on('Disconnect', (reason) => { rawLog('event:Disconnect', reason);
+    try { if (process.env.GITHUB_TOKEN || process.env.GH_TOKEN) { uploadDebugLogToGitHub().catch(()=>{}); } } catch(e){}  mirrorState.status='disconnected'; console.log(color('  [-] Disconnected: ' + (reason||'unknown'), 'red')); console.log(color('  [*] Shift+Q = quit, or wait/restart from menu if you rerun.', 'gray')); });
 
   // If we only have a challenge/UUID (no live PIN join useful) but got answers, show them
   const canJoinLive = /^\d{4,10}$/.test(String(pin||''));
@@ -1150,6 +1152,113 @@ async function runLeaver() {
   console.log(color('  [*] Press Shift+Q to quit, or 3 to leave bots.', 'gray'));
 }
 
+
+function buildDebugSummary() {
+  const sum = {
+    generatedAt: new Date().toISOString(),
+    pin: (typeof pin !== 'undefined' ? pin : null),
+    quizUuid: (typeof quizUuid !== 'undefined' ? quizUuid : null),
+    challengeId: (typeof challengeId !== 'undefined' ? challengeId : null),
+    leakedTitle: (typeof leakedTitle !== 'undefined' ? leakedTitle : null),
+    leakedHost: (typeof leakedHost !== 'undefined' ? leakedHost : null),
+    firstQuestionText: (typeof firstQuestionText !== 'undefined' ? firstQuestionText : null),
+    answerKey: (typeof answerKey !== 'undefined' && Array.isArray(answerKey)) ? answerKey : null,
+    rawCorrect: (typeof _rawCorrect !== 'undefined' ? _rawCorrect : null),
+    mirrorState: (typeof mirrorState !== 'undefined' ? mirrorState : null),
+    brainGames: (typeof _brain !== 'undefined' && _brain.games) ? _brain.games : null,
+    brainQuizzes: (typeof _brain !== 'undefined' && _brain.quizzes) ? Object.keys(_brain.quizzes) : null,
+    rawLogPath: JZ_RAWLOG,
+  };
+  const p = path.join(os.homedir(), '.jzkahoot_debug_summary.json');
+  try { fs.writeFileSync(p, JSON.stringify(sum, null, 2)); } catch(e){}
+  return { path: p, content: JSON.stringify(sum, null, 2) };
+}
+async function uploadDebugLogToGitHub() {
+  const token = process.env.GITHUB_TOKEN || process.env.GH_TOKEN || '';
+  const logPath = JZ_RAWLOG || path.join(os.homedir(), '.jzkahoot_rawlog.jsonl');
+  const summary = buildDebugSummary();
+  let content = '';
+  try { content = fs.readFileSync(logPath, 'utf8'); } catch(e) { content = ''; }
+  if (!content.trim()) { console.log(color('  [*] No debug log to upload (' + logPath + ').', 'gray')); return; }
+  // trim to last ~900k to fit gist
+  if (content.length > 900000) content = content.slice(-900000);
+  const filename = 'jzkahoot_debug_log.jsonl';
+  if (!token) {
+    console.log(color('  [*] Debug log saved locally: ' + logPath, 'cyan'));
+    console.log(color('  [*] To upload to GitHub, set GITHUB_TOKEN and run: node jzkahoot.js --upload-log', 'gray'));
+    return;
+  }
+  // try gist
+  try {
+    const body = JSON.stringify({ description: 'JZ Kahoot debug log', public: false, files: { [filename]: { content } } });
+    const res = await new Promise((resolve, reject) => {
+      const req = https.request({ hostname: 'api.github.com', path: '/gists', method: 'POST', headers: { 'Content-Type':'application/json', 'Authorization':'token '+token, 'User-Agent':'jzkahoot', 'Content-Length': Buffer.byteLength(body) } }, (r) => {
+        let b=''; r.on('data',d=>b+=d); r.on('end',()=>resolve({status:r.statusCode,body:b}));
+      });
+      req.on('error', reject); req.write(body); req.end();
+    });
+    if (res.status >= 200 && res.status < 300) {
+      try { const j=JSON.parse(res.body); console.log(color('  [+] Debug log uploaded to GitHub Gist: ' + (j.html_url||j.url||'ok'), 'green')); } catch(e){ console.log(color('  [+] Debug log uploaded.', 'green')); }
+    } else {
+      console.log(color('  [-] Gist upload failed (' + res.status + '): ' + String(res.body).slice(0,200), 'yellow'));
+    }
+  // upload summary gist
+  try {
+    const body2 = JSON.stringify({ description: 'JZ Kahoot debug summary', public: false, files: { 'jzkahoot_debug_summary.json': { content: summary.content } } });
+    const resS = await new Promise((resolve, reject) => {
+      const req = https.request({ hostname: 'api.github.com', path: '/gists', method: 'POST', headers: { 'Content-Type':'application/json', 'Authorization':'token '+token, 'User-Agent':'jzkahoot', 'Content-Length': Buffer.byteLength(body2) } }, (r) => { let b=''; r.on('data',d=>b+=d); r.on('end',()=>resolve({status:r.statusCode,body:b})); });
+      req.on('error', reject); req.write(body2); req.end();
+    });
+    if (resS.status >= 200 && resS.status < 300) { try { const j=JSON.parse(resS.body); console.log(color('  [+] Debug summary uploaded: ' + (j.html_url||'ok'), 'green')); } catch(e){} }
+  } catch(e){}
+  } catch(e) { console.log(color('  [-] Upload error: ' + (e&&e.message||e), 'yellow')); }
+
+  // also try committing to repo (needs repo scope token)
+  try {
+    const repo = process.env.GITHUB_REPO || 'flepo-hack/jzkahoot';
+    const branch = process.env.GITHUB_BRANCH || 'main';
+    const filePath = 'debug_log.jsonl';
+    // get existing sha
+    let sha = null;
+    try {
+      const g = await new Promise((resolve, reject) => {
+        const req = https.request({ hostname: 'api.github.com', path: '/repos/' + repo + '/contents/' + encodeURIComponent(filePath) + '?ref=' + branch, method: 'GET', headers: { 'Authorization':'token '+token, 'User-Agent':'jzkahoot', 'Accept':'application/vnd.github+json' } }, (r) => { let b=''; r.on('data',d=>b+=d); r.on('end',()=>resolve({status:r.statusCode,body:b})); });
+        req.on('error', reject); req.end();
+      });
+      if (g.status === 200) { try { sha = JSON.parse(g.body).sha; } catch(e){} }
+    } catch(e){}
+    const b64 = Buffer.from(content, 'utf8').toString('base64');
+    const putBody = JSON.stringify({ message: 'chore: update debug log ' + new Date().toISOString(), content: b64, branch, ...(sha?{sha}:{}) });
+    const res2 = await new Promise((resolve, reject) => {
+      const req = https.request({ hostname: 'api.github.com', path: '/repos/' + repo + '/contents/' + encodeURIComponent(filePath), method: 'PUT', headers: { 'Content-Type':'application/json', 'Authorization':'token '+token, 'User-Agent':'jzkahoot', 'Accept':'application/vnd.github+json', 'Content-Length': Buffer.byteLength(putBody) } }, (r) => { let b=''; r.on('data',d=>b+=d); r.on('end',()=>resolve({status:r.statusCode,body:b})); });
+      req.on('error', reject); req.write(putBody); req.end();
+    });
+    if (res2.status >= 200 && res2.status < 300) {
+      try { const j=JSON.parse(res2.body); console.log(color('  [+] Debug log committed to GitHub repo: ' + (j.content && j.content.html_url || repo + '/' + filePath), 'green')); } catch(e){ console.log(color('  [+] Debug log committed to GitHub repo.', 'green')); }
+    } else {
+      console.log(color('  [-] Repo commit failed (' + res2.status + '): ' + String(res2.body).slice(0,180), 'gray'));
+    }
+  // commit summary too
+  try {
+    const sumPath = 'debug_summary.json';
+    let shaS = null;
+    try {
+      const g = await new Promise((resolve, reject) => {
+        const req = https.request({ hostname: 'api.github.com', path: '/repos/' + repo + '/contents/' + encodeURIComponent(sumPath) + '?ref=' + branch, method: 'GET', headers: { 'Authorization':'token '+token, 'User-Agent':'jzkahoot', 'Accept':'application/vnd.github+json' } }, (r) => { let b=''; r.on('data',d=>b+=d); r.on('end',()=>resolve({status:r.statusCode,body:b})); });
+        req.on('error', reject); req.end();
+      });
+      if (g.status === 200) { try { shaS = JSON.parse(g.body).sha; } catch(e){} }
+    } catch(e){}
+    const putBody2 = JSON.stringify({ message: 'chore: update debug summary ' + new Date().toISOString(), content: Buffer.from(summary.content,'utf8').toString('base64'), branch, ...(shaS?{sha:shaS}:{}) });
+    const resS2 = await new Promise((resolve, reject) => {
+      const req = https.request({ hostname: 'api.github.com', path: '/repos/' + repo + '/contents/' + encodeURIComponent(sumPath), method: 'PUT', headers: { 'Content-Type':'application/json', 'Authorization':'token '+token, 'User-Agent':'jzkahoot', 'Accept':'application/vnd.github+json', 'Content-Length': Buffer.byteLength(putBody2) } }, (r) => { let b=''; r.on('data',d=>b+=d); r.on('end',()=>resolve({status:r.statusCode,body:b})); });
+      req.on('error', reject); req.write(putBody2); req.end();
+    });
+    if (resS2.status >= 200 && resS2.status < 300) console.log(color('  [+] Debug summary committed to GitHub repo.', 'green'));
+  } catch(e){}
+  } catch(e) { console.log(color('  [-] Repo commit error: ' + (e&&e.message||e), 'gray')); }
+}
+
 // ---------- Main ----------
 async function runSelfTest() {
   console.log(color('  [ SELF-TEST ]', 'bold'));
@@ -1184,6 +1293,11 @@ async function runSelfTest() {
 }
 
 async function main() {
+  if (process.argv.includes('--upload-log')) {
+    banner();
+    await uploadDebugLogToGitHub();
+    process.exit(0);
+  }
   if (process.argv.includes('--test')) {
     banner();
     await runSelfTest();
