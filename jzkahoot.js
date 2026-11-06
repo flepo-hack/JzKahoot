@@ -580,11 +580,9 @@ async function runAutoAnswer() {
   let candidatePos = 0;
   let firstQuestionText = null;
   let _rawCorrect = [];
-  const client = new Kahoot();
-  try { rawLog('client.challengeData', client.challengeData); } catch(e){}
-  try { rawLog('client.quiz', client.quiz); } catch(e){}
-  try { rawLog('client.defaults', client.defaults); } catch(e){}
-  try { rawLog('client.snapshot', { keys: Object.keys(client||{}), team: client.team, name: client.name, cid: client.cid, gameid: client.gameid, totalScore: client.totalScore, hasHandlers: !!client.handlers, hasClasses: !!client.classes }); } catch(e){}
+  const joinRes = Kahoot.join(String(pin || ''), (name || 'JZBot') + '\u200B');
+  const client = joinRes.client;
+  const joinEvent = joinRes.event;
   registerClient(client);
   function hookSocket(sock) {
     try {
@@ -705,7 +703,6 @@ async function runAutoAnswer() {
   }
 
   client.on('Joined', (settings) => { rawLog('event:Joined', settings);
-    console.log(color('  [+] Joined game. Waiting for start...', 'green'));
     mirrorState.status = 'joined'; try { rawLog('post-join:challengeData', client.challengeData); rawLog('post-join:quiz', client.quiz); rawLog('post-join:settings', settings); } catch(e){} try { brainLearn({ pin: pin, session: { mode: 'auto', name: name, joined: true } }); } catch(e) {}
     // harvest leaked metadata from session/settings
     try {
@@ -1041,7 +1038,10 @@ async function runAutoAnswer() {
     console.log(color('  [*] Private live quizzes without a public copy/challenge: answers are learned per question via QuestionEnd.', 'gray'));
   }
   console.log(color(`  [*] Joining game ${pin} as ${name}...`, 'cyan'));
-  client.join(String(pin), name + '\u200B').catch(err => {
+  joinEvent.then(() => {
+    console.log(color('  [+] Joined game. Waiting for host to start...', 'green'));
+    mirrorState.status = 'joined';
+  }).catch(err => {
     mirrorState.status='join-failed';
     console.log(color('  [-] Join failed: ' + (err && (err.description || err.message || err) || 'unknown'), 'red'));
     console.log(color('  [*] Check PIN (live game must be open). Shift+Q = quit.', 'gray'));
