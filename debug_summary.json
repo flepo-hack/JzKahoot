@@ -1,0 +1,29 @@
+{
+  "generatedAt": "2026-11-06T12:35:09.233Z",
+  "pin": null,
+  "quizUuid": null,
+  "challengeId": null,
+  "leakedTitle": null,
+  "leakedHost": null,
+  "firstQuestionText": null,
+  "answerKey": null,
+  "rawCorrect": null,
+  "mirrorState": {
+    "status": "idle",
+    "mode": "",
+    "pin": "",
+    "question": "",
+    "choices": [],
+    "selected": null,
+    "correct": null,
+    "qi": 0,
+    "bots": 0,
+    "joined": 0,
+    "source": "",
+    "quizTitle": "",
+    "overlayUrl": ""
+  },
+  "brainGames": {},
+  "brainQuizzes": [],
+  "rawLogPath": "/home/af7e243d70b1613d780683967f922c564c184de46ee2602f376510d67458f427/.jzkahoot_rawlog.jsonl"
+}
