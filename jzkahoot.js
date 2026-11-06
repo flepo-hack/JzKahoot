@@ -96,17 +96,61 @@ function extractMeta(obj, meta, key) {
   return meta;
 }
 
-async function fetchAnswers(uuid) {
-  if (!uuid) return null;
+function normalizeQuizQuestions(data) {
+  if (!data) return null;
+  if (Array.isArray(data.questions)) return data.questions;
+  if (data.kahoot && Array.isArray(data.kahoot.questions)) return data.kahoot.questions;
+  if (data.challenge && data.kahoot && Array.isArray(data.kahoot.questions)) return data.kahoot.questions;
+  if (Array.isArray(data.answers)) {
+    // challenge answers/progress shape -> map to question-like objects with choices
+    return data.answers.map((a, i) => {
+      const choices = Array.isArray(a.answers) ? a.answers : (Array.isArray(a.choices) ? a.choices : []);
+      return { question: a.question || ('Question ' + (i+1)), choices: choices.map(c => typeof c==='string'?{answer:c,correct:false}:{answer:c.answer||c.text||'', correct:!!c.correct, index:c.index}) };
+    }).filter(q => q.choices && q.choices.length);
+  }
+  return null;
+}
+async function fetchAnswers(uuidOrRef) {
+  if (!uuidOrRef) return null;
+  const ref = String(uuidOrRef).trim();
+  // challenge pin/id reference
+  if (/^challenge:/i.test(ref)) {
+    const cid = ref.replace(/^challenge:/i, '').trim();
+    const urls = [
+      `https://kahoot.it/rest/challenges/${encodeURIComponent(cid)}/answers`,
+      `https://kahoot.it/rest/challenges/${encodeURIComponent(cid)}`,
+      `https://kahoot.it/rest/challenges/pin/${encodeURIComponent(cid)}`,
+    ];
+    for (const u of urls) {
+      try {
+        const data = await httpGetJson(u, 9000);
+        const q = normalizeQuizQuestions(data);
+        if (q && q.length) return q;
+        // some challenge payloads nest kahoot
+        if (data && data.kahoot && Array.isArray(data.kahoot.questions)) return data.kahoot.questions;
+        // if pin lookup returned challenge id info, try answers endpoint
+        if (data && (data.challengeId || data.id || data.uuid)) {
+          const id = data.challengeId || data.id || data.uuid;
+          const q2 = await fetchAnswers('challenge:' + id);
+          if (q2) return q2;
+        }
+      } catch (e) {}
+    }
+    return null;
+  }
+  const uuid = ref;
   const urls = [
     `https://create.kahoot.it/rest/kahoots/${uuid}`,
+    `https://create.kahoot.it/rest/kahoots/${uuid}/card/?includeKahoot=true`,
     `https://kahoot.it/rest/kahoots/${uuid}`,
-    `https://play.kahoot.it/rest/kahoots/${uuid}`
+    `https://kahoot.it/rest/kahoots/${uuid}/card/?includeKahoot=true`,
+    `https://play.kahoot.it/rest/kahoots/${uuid}`,
   ];
   for (const u of urls) {
     try {
       const data = await httpGetJson(u, 8000);
-      if (data && Array.isArray(data.questions)) return data.questions;
+      const q = normalizeQuizQuestions(data);
+      if (q && q.length) return q;
     } catch (e) {}
   }
   return null;
@@ -464,13 +508,45 @@ setInterval(tick,450);tick();
   return srv;
 }
 
+
+function parseKahootInput(input) {
+  const raw = String(input || '').trim();
+  const out = { raw, pin: '', quizUuid: '', challengeId: '' };
+  if (!raw) return out;
+  // challenge URL/pin
+  let m = raw.match(/challenge\/(?:pin\/)?(\d{4,10})/i);
+  if (m) out.challengeId = m[1];
+  m = raw.match(/[?&](?:challenge-?id|challengeId)=([^&\s]+)/i);
+  if (m && !out.challengeId) out.challengeId = decodeURIComponent(m[1]);
+  m = raw.match(/challenge[_\-\/]([0-9a-f-]{8,}|[\w-]+_\d+)/i);
+  if (m && !out.challengeId && !/^\d+$/.test(m[1])) out.challengeId = m[1];
+  // quizId/uuid in URL
+  m = raw.match(/[?&]quizId=([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/i);
+  if (m) out.quizUuid = m[1];
+  m = raw.match(/\/details\/[^/\s]+\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/i);
+  if (m && !out.quizUuid) out.quizUuid = m[1];
+  m = raw.match(/\/kahoot\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/i);
+  if (m && !out.quizUuid) out.quizUuid = m[1];
+  if (!out.quizUuid && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(raw)) out.quizUuid = raw;
+  // numeric: live PINs are usually 6-8 digits, challenge PINs can be 7+; treat as both candidates
+  if (/^\d{4,10}$/.test(raw)) {
+    out.pin = raw;
+    if (raw.length >= 7) out.challengeId = out.challengeId || raw;
+  }
+  return out;
+}
+
 // ---------- Auto Answer ----------
 async function runAutoAnswer() {
   console.log(color('  [ AUTO ANSWER BOT ]', 'bold'));
   const name = (await ask('  Bot name: ') || 'JZBot').trim();
   let mode = (await ask('  Mode (1=RAGE all correct, 2=non-suspicious): ')).trim();
   if (mode !== '1' && mode !== '2') mode = '2';
-  const pin = (await ask('  Kahoot PIN: ') || '').trim();
+  const rawInput = (await ask('  Game PIN / challenge link / quiz URL: ') || '').trim();
+  const parsed = parseKahootInput(rawInput);
+  let pin = parsed.pin || (/^\d+$/.test(rawInput) ? rawInput : '');
+  if (parsed.challengeId) console.log(color('  [*] Detected challenge: ' + parsed.challengeId + ' (trying challenge answers + live PIN paths)', 'cyan'));
+  if (parsed.quizUuid) console.log(color('  [*] Detected quiz UUID: ' + parsed.quizUuid, 'cyan'));
 
   closePrompts();
   enableRawExit();
@@ -578,6 +654,11 @@ async function runAutoAnswer() {
 
   client.on('QuizStart', (quiz) => {
     console.log(color('  [*] Quiz started.', 'cyan'));
+    try {
+      if (quiz && (quiz.name || quiz.quizName || quiz.title) && !leakedTitle) leakedTitle = quiz.name || quiz.quizName || quiz.title;
+      if (quiz && (quiz.uuid || quiz.quizId || quiz.kahootId) && !quizUuid) tryLoadUuid(String(quiz.uuid||quiz.quizId||quiz.kahootId), 'QuizStart-field');
+      if (quiz && Array.isArray(quiz.quizQuestionAnswers) && !structCandidates && !answerKey) structCandidates = prefetchByStructure(quiz.quizQuestionAnswers, leakedTitle, leakedHost);
+    } catch(e){}
     mirrorState.status = 'quiz'; mirrorState.qi = 0;
     // same game PIN seen before?
     try {
@@ -788,8 +869,27 @@ async function runAutoAnswer() {
   client.on('TwoFactorReset', () => { console.log(color('  [!] 2FA required (host code) - bot cannot answer automatically', 'yellow')); });
   client.on('Disconnect', (reason) => { console.log(color('  [-] Disconnected: ' + reason, 'red')); process.exit(0); });
 
+  // If we only have a challenge/UUID (no live PIN join useful) but got answers, show them
+  const canJoinLive = /^\d{4,10}$/.test(String(pin||''));
+  if (!canJoinLive && Array.isArray(answerKey) && answerKey.length) {
+    mirrorState.status = 'answers-loaded'; mirrorState.pin = String(challengeId||quizUuid||'');
+    console.log(color('\n  [+] Answers loaded: ' + answerKey.length + ' questions (no live join).', 'green'));
+    answerKey.forEach((q,i)=>{
+      const correct = (q.choices||[]).map((c,idx)=>c&&c.correct?idx:-1).filter(x=>x>=0);
+      console.log(color('  Q'+(i+1)+': ' + (q.question||q.title||''), 'cyan'));
+      (q.choices||[]).forEach((c,idx)=> console.log('    '+idx+': '+(c&& (c.answer||c.text||c)||'') + (correct.includes(idx)?color('  [CORRECT]','green'):'')));
+      if (!correct.length && q.correctChoices) console.log('    correct: ' + JSON.stringify(q.correctChoices));
+    });
+    try { if (quizUuid) brainLearn({ uuid: quizUuid, quiz: answerKey, title: leakedTitle }); if (challengeId) brainLearn({ pin: challengeId, session: { challenge: true, uuid: quizUuid||null } }); } catch(e){}
+    console.log(color('\n  [*] Press Shift+Q to quit.', 'gray'));
+    setInterval(()=>{}, 60000); return;
+  }
+  if (!canJoinLive) {
+    console.log(color('  [-] No joinable live PIN. Provide a live game PIN, challenge link/PIN, or public quizId/URL.', 'red'));
+    console.log(color('  [*] Private live quizzes without a public copy/challenge: answers are learned per question via QuestionEnd.', 'gray'));
+  }
   console.log(color(`  [*] Joining game ${pin} as ${name}...`, 'cyan'));
-  client.join(pin, name + '\u200B').catch(err => {
+  client.join(String(pin), name + '\u200B').catch(err => {
     console.log(color('  [-] Join failed: ' + (err.description || err), 'red'));
     process.exit(1);
   });
