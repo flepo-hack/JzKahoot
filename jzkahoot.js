@@ -1275,7 +1275,11 @@ function autoPushDebugLog() {
     const msg = 'chore: auto debug log ' + new Date().toISOString();
     const commitOut = run('git commit -m "' + msg + '"');
     if (/nothing to commit/i.test(commitOut)) { /* no changes */ }
-    const pushOut = run('git push');
+    let pushOut = run('git push');
+    if (/rejected|non-fast-forward|fetch first/i.test(String(pushOut))) {
+      run('git pull --rebase origin main');
+      pushOut = run('git push');
+    }
     const ok = !/error|fatal|rejected|denied/i.test(String(pushOut + commitOut));
     if (ok) console.log(color('  [+] Debug log auto-pushed to GitHub (git).', 'green'));
     else if (pushOut) console.log(color('  [*] Auto-push skipped/failed (configure git auth once: gh auth login). ' + String(pushOut).slice(0,160), 'gray'));
