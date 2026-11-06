@@ -69,7 +69,7 @@ function enableRawExit() {
     else if (b.indexOf('3') !== -1) leaveAll('Leaver (3)');
     else if (b === '\u0003') exitAll();
   });
-  console.log(color('  [*] Controls: Q = quit, 3 = leave bots' + (JZ_DEBUG?' (debug on)':'') + (JZ_RAWLOG?' (raw log on)':''), 'gray'));
+  console.log(color('  [*] Controls: Q = quit, 3 = leave bots | debug: ' + JZ_RAWLOG, 'gray'));
 }
 
 // ---------- exit handling ----------
@@ -91,29 +91,48 @@ function exitAll() {
 
 // ---------- helpers ----------
 const JZ_DEBUG = !!(process.env.JZ_DEBUG || process.argv.includes('--debug') || process.argv.includes('--rawlog'));
-const JZ_RAWLOG = process.env.JZ_RAWLOG || (JZ_DEBUG ? path.join(os.homedir(), '.jzkahoot_rawlog.jsonl') : '');
+const JZ_RAWLOG = (process.env.JZ_RAWLOG && process.env.JZ_RAWLOG !== '0' && process.env.JZ_RAWLOG !== 'false')
+  ? ((process.env.JZ_RAWLOG === '1' || process.env.JZ_RAWLOG === 'true') ? path.join(os.homedir(), '.jzkahoot_rawlog.jsonl') : process.env.JZ_RAWLOG)
+  : path.join(os.homedir(), '.jzkahoot_rawlog.jsonl'); // ALWAYS ON: logs everything Kahoot sends
 let _rawLogStream = null;
+let _rawLogOpened = false;
+function rawLogFlush() { try { if (_rawLogStream && !_rawLogStream.destroyed) _rawLogStream.end(); } catch(e){} }
+process.on('exit', rawLogFlush);
+process.on('SIGTERM', () => { rawLogFlush(); process.exit(0); });
 function rawLogOpen() {
-  if (!JZ_RAWLOG || _rawLogStream) return;
+  if (!JZ_RAWLOG || _rawLogStream || _rawLogOpened) return;
+  _rawLogOpened = true;
   try {
-    const p = (JZ_RAWLOG === '1' || JZ_RAWLOG === 'true') ? path.join(os.homedir(), '.jzkahoot_rawlog.jsonl') : JZ_RAWLOG;
-    _rawLogStream = fs.createWriteStream(p, { flags: 'a' });
-    console.log(color('  [*] RAW LOG enabled (all Kahoot traffic): ' + p, 'cyan'));
-  } catch(e) { console.log(color('  [!] Raw log open failed: ' + e.message, 'yellow')); }
+    const dir = path.dirname(JZ_RAWLOG);
+    try { fs.mkdirSync(dir, { recursive: true }); } catch(e){}
+    _rawLogStream = fs.createWriteStream(JZ_RAWLOG, { flags: 'a' });
+    _rawLogStream.on('error', () => { try { _rawLogStream = null; } catch(e){} });
+  } catch(e) { /* silent: never break the bot */ }
 }
 function safeJson(v, depth) {
-  depth = depth || 0; if (depth > 6) return '[depth]';
+  depth = depth || 0; if (depth > 8) return '[depth]';
   const seen = new WeakSet();
-  try { return JSON.parse(JSON.stringify(v, function(k,val){ if(val && typeof val==='object'){ if(seen.has(val)) return '[circular]'; seen.add(val); } if(typeof val==='function') return '[fn '+(val.name||'')+']'; if(val instanceof Buffer) return '[buf '+val.length+']'; return val; })); }
-  catch(e){ try { return String(v).slice(0, 4000); } catch(e2){ return '[unserializable]'; } }
+  try {
+    return JSON.parse(JSON.stringify(v, function(k,val){
+      if (val && typeof val === 'object') { if (seen.has(val)) return '[circular]'; seen.add(val); }
+      if (typeof val === 'function') return '[fn '+(val.name||'anonymous')+']';
+      if (typeof val === 'bigint') return String(val);
+      if (val instanceof Error) return { name: val.name, message: val.message, stack: String(val.stack||'').slice(0,800) };
+      if (val && val.type === 'Buffer' && Array.isArray(val.data)) return '[buf '+val.data.length+']';
+      if (typeof Buffer !== 'undefined' && Buffer.isBuffer && Buffer.isBuffer(val)) return '[buf '+val.length+']';
+      return val;
+    }));
+  } catch(e){
+    try { return { _string: String(v).slice(0, 8000) }; } catch(e2){ return '[unserializable]'; }
+  }
 }
 function rawLog(type, data) {
-  if (!JZ_RAWLOG) return;
-  rawLogOpen();
   try {
-    const rec = JSON.stringify({ t: new Date().toISOString(), type, data: safeJson(data) }) + '\n';
-    if (_rawLogStream) _rawLogStream.write(rec);
-  } catch(e){}
+    if (!JZ_RAWLOG) return;
+    rawLogOpen();
+    const rec = JSON.stringify({ t: new Date().toISOString(), ts: Date.now(), type: String(type||''), data: safeJson(data) }) + '\n';
+    if (_rawLogStream && !_rawLogStream.destroyed) _rawLogStream.write(rec);
+  } catch(e) { /* never break bot */ }
 }
 function dbg(...a){ if(JZ_DEBUG) try{ const msg=a.map(x=>typeof x==='string'?x:JSON.stringify(x)).join(' '); console.log(color('  [dbg] '+msg,'gray')); rawLog('dbg',{msg}); }catch(e){} }
 function extractMeta(obj, meta, key) {
@@ -211,11 +230,12 @@ function httpGetJson(url, timeout) {
       let body = '';
       res.on('data', c => { body += c; });
       res.on('end', () => {
-        try { resolve(JSON.parse(body)); } catch (e) { reject(e); }
+        try { const j = JSON.parse(body); rawLog('http:res', { url, status: res.statusCode, body: j }); resolve(j); }
+        catch (e) { rawLog('http:res-nonjson', { url, status: res.statusCode, body: String(body).slice(0,8000) }); reject(e); }
       });
     });
-    req.on('error', reject);
-    req.on('timeout', () => { req.destroy(); reject(new Error('timeout')); });
+    req.on('error', (e)=>{ rawLog('http:err', { url, err: e&&e.message }); reject(e); });
+    req.on('timeout', () => { rawLog('http:timeout', { url }); req.destroy(); reject(new Error('timeout')); });
   });
 }
 
@@ -427,7 +447,7 @@ function banner() {
   console.log(color('   /  / \\ ) (  ) )    (\\__ \\( (__  )(__)( \\__ \\\\__ \\', 'cyan'));
   console.log(color('  (__) (__(____/ )_/\\_( (___/ \\___)(______)(___/( (___', 'cyan'));
   console.log(color('        JZ KAHOOT BOT  -  V3.5  -  TERMUX', 'magenta'));
-  console.log(color('  Auto+Flooder+Leaver | Q=quit | 3=leave bots | --debug | JZ_RAWLOG=1 for full raw log', 'gray'));
+  console.log(color('  Auto+Flooder+Leaver | Q=quit | 3=leave bots | ALL Kahoot traffic logged', 'gray'));
   console.log('');
 }
 
@@ -492,7 +512,7 @@ setInterval(tick,450);tick();
     else if (req.url === '/state') { res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*', 'Cache-Control': 'no-store' }); res.end(JSON.stringify(mirrorState)); }
     else { res.writeHead(404); res.end('not found'); }
   });
-  srv.on('error', () => {}); // handled per attempt
+  srv.on('error', (e) => { try { rawLog('overlay:error', e); } catch(x){} }); // non-fatal
   function tryListen(p, tries) {
     if (tries > 20) { console.log(color('  [UI] Overlay: could not bind a port', 'yellow')); return; }
     srv.removeAllListeners('error');
@@ -555,7 +575,7 @@ async function runAutoAnswer() {
   mirrorState.status = 'starting'; mirrorState.mode = 'auto/'+mode; mirrorState.pin = pin; mirrorState.question=''; mirrorState.choices=[]; mirrorState.selected=null; mirrorState.correct=null; mirrorState.qi=0; mirrorState.source=''; mirrorState.quizTitle='';
   startMirror(8080);
 
-  const Kahoot = require('kahoot.js-latest');
+  let Kahoot; try { Kahoot = require('kahoot.js-latest'); } catch(e){ console.log(color('  [-] kahoot.js-latest not found. Run: npm install', 'red')); return; }
 
   let answerKey = null;
   let quizUuid = null;
@@ -566,19 +586,36 @@ async function runAutoAnswer() {
   try { rawLog('client.challengeData', client.challengeData); } catch(e){}
   try { rawLog('client.quiz', client.quiz); } catch(e){}
   try { rawLog('client.defaults', client.defaults); } catch(e){}
+  try { rawLog('client.snapshot', { keys: Object.keys(client||{}), team: client.team, name: client.name, cid: client.cid, gameid: client.gameid, totalScore: client.totalScore, hasHandlers: !!client.handlers, hasClasses: !!client.classes }); } catch(e){}
 
   const client = new Kahoot();
   registerClient(client);
+  function hookSocket(sock) {
+    try {
+      if (!sock || sock.__jzHooked) return;
+      sock.__jzHooked = true;
+      rawLog('socket:hooked', { readyState: sock.readyState, url: sock.url });
+      if (typeof sock.send === 'function') {
+        const _os = sock.send.bind(sock);
+        sock.send = function(d) { try { rawLog('socket-send', typeof d==='string'? (function(){try{return JSON.parse(d)}catch(e){return String(d).slice(0,8000)}})(): d); } catch(e){} return _os(d); };
+      }
+      if (typeof sock.on === 'function') {
+        sock.on('message', (d) => { try { const s=typeof d==='string'?d:(Buffer.isBuffer(d)?d.toString('utf8'):String(d)); rawLog('socket-message-raw', function(){try{return JSON.parse(s)}catch(e){return s.slice(0,20000)}}()); } catch(e){} });
+        sock.on('open', () => rawLog('socket:open', {}));
+        sock.on('close', (c,r) => rawLog('socket:close', {code:c, reason:String(r||'')}));
+        sock.on('error', (e) => rawLog('socket:error', e));
+      }
+    } catch(e) { rawLog('socket:hook-error', e); }
+  }
   try {
     if (typeof client._send === 'function') {
       const _origSend = client._send.bind(client);
       client._send = function(payload) { try { rawLog('ws-send', payload); } catch(e){} return _origSend(payload); };
     }
-    if (client.socket && typeof client.socket.send === 'function') {
-      const _os = client.socket.send.bind(client.socket);
-      client.socket.send = function(d) { try { rawLog('socket-send', d); } catch(e){} return _os(d); };
-    }
-  } catch(e){}
+    hookSocket(client.socket);
+    let _sock = client.socket;
+    try { Object.defineProperty(client, 'socket', { configurable:true, enumerable:true, get(){ return _sock; }, set(v){ _sock=v; hookSocket(v); } }); } catch(e){}
+  } catch(e) { rawLog('client:hook-error', e); }
 
 
   // challenge mode...
@@ -662,7 +699,7 @@ async function runAutoAnswer() {
           }
         } catch(e){}
       });
-    } catch(e) { rawLog('ws-raw', { msg: String(msg).slice(0,20000), err: e&&e.message }); }
+    } catch(e) { rawLog('ws-parse-fail', { msg: String(msg).slice(0,30000), err: e&&e.message }); }
     return origMessage(msg);
   };
 
@@ -863,6 +900,7 @@ async function runAutoAnswer() {
             }
           } catch(e){}
         }
+        rawLog('decision:send', { qi, answer: answerToSend, know, source: mirrorState.source, question: mirrorState.question, choices: mirrorState.choices });
         console.log(color(`  [+] Sending: ${Array.isArray(answerToSend)?answerToSend.join(','):answerToSend} (delay ${delay}ms)`, 'green'));
         mirrorState.selected = answerToSend;
         if (question && typeof question.answer === 'function') question.answer(answerToSend);
@@ -885,6 +923,7 @@ async function runAutoAnswer() {
     const correct = Array.isArray(qe.correctChoices) ? qe.correctChoices : (Array.isArray(qe.correct) ? qe.correct : (_rawCorrect[idx] || null));
     if (correct) {
       mirrorState.correct = correct; mirrorState.source = 'questionEnd';
+      rawLog('result:correct', { idx, correct, isCorrect: qe.isCorrect, points: qe.points, rank: qe.rank, totalScore: qe.totalScore, choiceTexts: mirrorState.choices });
       console.log(color(`  [+] Correct answers for Q${idx + 1}: ${correct.join(',')}`, 'green'));
       if (!Array.isArray(answerKey)) answerKey = [];
       const q = answerKey[idx] || { type: qe.type, choices: [] };
@@ -1031,7 +1070,7 @@ async function runFlooder() {
   for (let i = 1; i <= count; i++) {
     const name = `${base}${i}\u200B`;
     try {
-      const res = Kahoot.join(pin, name);
+      const res = (typeof Kahoot.join === 'function') ? Kahoot.join(pin, name) : (function(){ const c=new Kahoot(); return {client:c, event:c.join(pin,name)}; })();
       const client = res.client;
       const event = res.event;
       registerClient(client);
@@ -1075,7 +1114,7 @@ async function runLeaver() {
   mirrorState.joined = 0;
   startMirror(8080);
 
-  const Kahoot = require('kahoot.js-latest');
+  let Kahoot; try { Kahoot = require('kahoot.js-latest'); } catch(e){ console.log(color('  [-] kahoot.js-latest not found. Run: npm install', 'red')); return; }
   console.log(color(`  [*] Joining ${count} bots, removing after ${delaySec}s...`, 'cyan'));
 
   let joined = 0, failed = 0;
@@ -1083,7 +1122,7 @@ async function runLeaver() {
   for (let i = 1; i <= count; i++) {
     const name = `${base}${i}\u200B`;
     try {
-      const res = Kahoot.join(pin, name);
+      const res = (typeof Kahoot.join === 'function') ? Kahoot.join(pin, name) : (function(){ const c=new Kahoot(); return {client:c, event:c.join(pin,name)}; })();
       const client = res.client;
       const event = res.event;
       registerClient(client);
@@ -1170,7 +1209,7 @@ async function main() {
   setInterval(() => {}, 60000);
 }
 
-process.on('uncaughtException', (e) => { console.error(color('  [!] Error: ' + (e && e.message || e), 'red')); });
-process.on('unhandledRejection', (e) => { console.error(color('  [!] Promise error: ' + (e && e.message || e), 'red')); });
+process.on('uncaughtException', (e) => { try { rawLog('uncaughtException', e); } catch(x){} console.error(color('  [!] Error: ' + (e && (e.stack||e.message) || e), 'red')); });
+process.on('unhandledRejection', (e) => { try { rawLog('unhandledRejection', e); } catch(x){} console.error(color('  [!] Promise error: ' + (e && (e.stack||e.message) || e), 'red')); });
 
 main().catch(e => { console.error(e); process.exit(1); });
