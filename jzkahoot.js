@@ -69,7 +69,7 @@ function enableRawExit() {
     else if (b.indexOf('3') !== -1) leaveAll('Leaver (3)');
     else if (b === '\u0003') exitAll();
   });
-  console.log(color('  [*] Controls: Q = quit, 3 = leave bots', 'gray'));
+  console.log(color('  [*] Controls: Q = quit, 3 = leave bots' + (JZ_DEBUG?' (debug on)':''), 'gray'));
 }
 
 // ---------- exit handling ----------
@@ -90,6 +90,8 @@ function exitAll() {
 }
 
 // ---------- helpers ----------
+const JZ_DEBUG = !!process.env.JZ_DEBUG;
+function dbg(...a){ if(JZ_DEBUG) try{ console.log(color('  [dbg] '+a.map(x=>typeof x==='string'?x:JSON.stringify(x)).join(' '),'gray')); }catch(e){} }
 function extractMeta(obj, meta, key) {
   meta = meta || { uuids: [], titles: [], hosts: [], media: [] };
   key = (key || '').toLowerCase();
@@ -591,6 +593,7 @@ async function runAutoAnswer() {
   let leakedHost = null;
   const origMessage = client._message.bind(client);
   client._message = function (msg) {
+    try { if (JZ_DEBUG) { const p=JSON.parse(msg); const arr=Array.isArray(p)?p:[p]; arr.forEach(m=>{ if(m&&m.channel) dbg('ws', m.channel, m.data&&m.data.id, m.data&&m.data.type); }); } } catch(e){}
     try {
       const parsed = JSON.parse(msg);
       const arr = Array.isArray(parsed) ? parsed : [parsed];
