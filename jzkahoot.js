@@ -97,7 +97,7 @@ const JZ_RAWLOG = (process.env.JZ_RAWLOG && process.env.JZ_RAWLOG !== '0' && pro
 let _rawLogStream = null;
 let _rawLogOpened = false;
 function rawLogFlush() { try { if (_rawLogStream && !_rawLogStream.destroyed) _rawLogStream.end(); } catch(e){} }
-process.on('exit', rawLogFlush);
+process.on('exit', () => { try { rawLogFlush(); } catch(e){} try { autoPushDebugLog(); } catch(e){} });
 process.on('SIGTERM', () => { rawLogFlush(); process.exit(0); });
 function rawLogOpen() {
   if (!JZ_RAWLOG || _rawLogStream || _rawLogOpened) return;
@@ -1016,10 +1016,12 @@ async function runAutoAnswer() {
   try { client.on('questionEnd', handleQuestionEnd); } catch(e){}
   try { client.on('RevealAnswer', handleQuestionEnd); } catch(e){}
   client.on('QuizEnd', (ev) => { rawLog('event:QuizEnd', ev);
+    try { autoPushDebugLog(); } catch(e){}
     try { if (process.env.GITHUB_TOKEN || process.env.GH_TOKEN) { uploadDebugLogToGitHub().catch(()=>{}); } } catch(e){}  mirrorState.status = 'ended'; mirrorState.source='ended'; console.log(color('  [+] Quiz ended. Shift+Q to quit.', 'cyan')); try { brainLearn({ pin: pin, session: { ended: true, uuid: quizUuid || null, title: leakedTitle||null } }); if (quizUuid && Array.isArray(answerKey)) brainLearn({ uuid: quizUuid, quiz: answerKey, title: leakedTitle }); } catch(e) {} });
   client.on('TwoFactorReset', (ev)=>{ rawLog('event:TwoFactorReset', ev); });
   client.on('TwoFactorReset', () => { console.log(color('  [!] 2FA required (host code) - bot cannot answer automatically', 'yellow')); });
   client.on('Disconnect', (reason) => { rawLog('event:Disconnect', reason);
+    try { autoPushDebugLog(); } catch(e){}
     try { if (process.env.GITHUB_TOKEN || process.env.GH_TOKEN) { uploadDebugLogToGitHub().catch(()=>{}); } } catch(e){}  mirrorState.status='disconnected'; console.log(color('  [-] Disconnected: ' + (reason||'unknown'), 'red')); console.log(color('  [*] Shift+Q = quit, or wait/restart from menu if you rerun.', 'gray')); });
 
   // If we only have a challenge/UUID (no live PIN join useful) but got answers, show them
@@ -1259,6 +1261,30 @@ async function uploadDebugLogToGitHub() {
   } catch(e) { console.log(color('  [-] Repo commit error: ' + (e&&e.message||e), 'gray')); }
 }
 
+
+function autoPushDebugLog() {
+  try {
+    const repoDir = __dirname;
+    const logPath = JZ_RAWLOG || path.join(os.homedir(), '.jzkahoot_rawlog.jsonl');
+    const summaryPath = path.join(os.homedir(), '.jzkahoot_debug_summary.json');
+    try { buildDebugSummary(); } catch(e){}
+    const files = [];
+    try { if (fs.existsSync(logPath)) { fs.copyFileSync(logPath, path.join(repoDir, 'debug_log.jsonl')); files.push('debug_log.jsonl'); } } catch(e){}
+    try { if (fs.existsSync(summaryPath)) { fs.copyFileSync(summaryPath, path.join(repoDir, 'debug_summary.json')); files.push('debug_summary.json'); } } catch(e){}
+    if (!files.length) return;
+    const cp = require('child_process');
+    const run = (cmd) => { try { return cp.execSync(cmd, { cwd: repoDir, timeout: 30000, stdio: 'pipe' }).toString(); } catch(e) { return (e && (e.stderr||e.stdout||e.message)) || ''; } };
+    run('git add ' + files.join(' '));
+    const msg = 'chore: auto debug log ' + new Date().toISOString();
+    const commitOut = run('git commit -m "' + msg + '"');
+    if (/nothing to commit/i.test(commitOut)) { /* no changes */ }
+    const pushOut = run('git push');
+    const ok = !/error|fatal|rejected|denied/i.test(String(pushOut + commitOut));
+    if (ok) console.log(color('  [+] Debug log auto-pushed to GitHub (git).', 'green'));
+    else if (pushOut) console.log(color('  [*] Auto-push skipped/failed (configure git auth once: gh auth login). ' + String(pushOut).slice(0,160), 'gray'));
+  } catch(e) { /* never break exit */ }
+}
+
 // ---------- Main ----------
 async function runSelfTest() {
   console.log(color('  [ SELF-TEST ]', 'bold'));
@@ -1293,7 +1319,7 @@ async function runSelfTest() {
 }
 
 async function main() {
-  if (process.argv.includes('--upload-log')) {
+  if (process.argv.includes('--push-log') || process.argv.includes('--upload-log')) {
     banner();
     await uploadDebugLogToGitHub();
     process.exit(0);
