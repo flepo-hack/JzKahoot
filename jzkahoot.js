@@ -47,14 +47,29 @@ function closePrompts() {
   if (rl) { try { rl.close(); } catch (e) {} rl = null; }
 }
 function enableRawExit() {
+  process.on('SIGINT', () => exitAll());
   if (!process.stdin.isTTY) return;
-  readline.emitKeypressEvents(process.stdin);
+  try { readline.emitKeypressEvents(process.stdin); } catch(e){}
   try { process.stdin.setRawMode(true); } catch (e) {}
-  process.stdin.on('keypress', (str, key) => {
-    if (str === 'Q' || str === 'q') exitAll();
-    if (str === '3') { leaveAll('Leaver (3)'); }
-    if (key && key.ctrl && key.name === 'c') exitAll();
+  try { process.stdin.resume(); } catch(e){}
+  process.stdin.removeAllListeners('keypress');
+  process.stdin.removeAllListeners('data');
+  const onKey = (str, key) => {
+    const ch = String(str || '');
+    const name = key && key.name;
+    if (ch === 'Q' || ch === 'q' || name === 'q') { exitAll(); return; }
+    if (ch === '3') { leaveAll('Leaver (3)'); return; }
+    if (key && key.ctrl && (name === 'c' || name === 'q')) { exitAll(); return; }
+  };
+  process.stdin.on('keypress', onKey);
+  // fallback for terminals where keypress is unreliable
+  process.stdin.on('data', (buf) => {
+    const b = String(buf || '');
+    if (b.indexOf('Q') !== -1 || b.indexOf('q') !== -1) exitAll();
+    else if (b.indexOf('3') !== -1) leaveAll('Leaver (3)');
+    else if (b === '\u0003') exitAll();
   });
+  console.log(color('  [*] Controls: Q = quit, 3 = leave bots', 'gray'));
 }
 
 // ---------- exit handling ----------
@@ -441,7 +456,7 @@ function startMirror(port) {
 <title>JZ Kahoot Overlay</title>
 <style>
 :root{--bg:#070b14;--card:#121a2b;--bd:#24304f;--tx:#e8eefc;--mut:#8ea0c7;--ok:#00c853;--blue:#448aff;--warn:#ffab00;--cyan:#00e5ff}
-*{box-sizing:border-box} body{font-family:system-ui,-apple-system,Arial,sans-serif;background:var(--bg);color:var(--tx);margin:0;padding:10px;font-size:14px}
+*{box-sizing:border-box} body{font-family:system-ui,-apple-system,Arial,sans-serif;background:var(--bg);color:var(--tx);margin:0;padding:8px;font-size:13px;max-width:420px}
 h1{color:var(--cyan);font-size:16px;margin:0 0 6px;display:flex;align-items:center;gap:6px}
 .dot{width:8px;height:8px;border-radius:50%;background:var(--warn);display:inline-block}
 .meta{color:var(--mut);font-size:12px;margin:2px 0}
@@ -497,11 +512,13 @@ setInterval(tick,450);tick();
     if (tries > 20) { console.log(color('  [UI] Overlay: could not bind a port', 'yellow')); return; }
     srv.removeAllListeners('error');
     srv.once('error', (e) => { if (e && e.code === 'EADDRINUSE') tryListen(p + 1, tries + 1); });
-    srv.listen(p, '0.0.0.0', () => {
+    srv.listen(p, '127.0.0.1', () => {
       _mirrorSrv = srv; mirrorState.overlayUrl = 'http://127.0.0.1:' + p;
-      console.log(color('  [UI] Overlay: http://127.0.0.1:' + p + '  (open in Chrome / termux-open-url)', 'cyan'));
-      try { require('child_process').exec('termux-open-url ' + mirrorState.overlayUrl, {timeout:1500}); } catch (e) {}
-      try { require('child_process').exec('am start -a android.intent.action.VIEW -d ' + mirrorState.overlayUrl, {timeout:1500}); } catch (e) {}
+      console.log(color('  [UI] Overlay (mini): ' + mirrorState.overlayUrl, 'cyan'));
+      console.log(color('  [UI] Tip: open in Chrome, then use split-screen/popup; Termux cannot draw a native floating overlay without extra Android permissions.', 'gray'));
+      try { require('child_process').exec('termux-open-url ' + mirrorState.overlayUrl, {timeout:2000}); } catch (e) {}
+      try { require('child_process').exec('am start -a android.intent.action.VIEW -d ' + mirrorState.overlayUrl + ' com.android.chrome', {timeout:2000}); } catch (e) {}
+      try { require('child_process').exec('am start -a android.intent.action.VIEW -d ' + mirrorState.overlayUrl, {timeout:2000}); } catch (e) {}
     });
   }
   tryListen(port, 0);
@@ -743,11 +760,23 @@ async function runAutoAnswer() {
     let answerToSend;
     let know = false;
     let wrong = false;
-    const r = computeAnswer(qData2, mode, choiceCount);
+    let r = computeAnswer(qData2, mode, choiceCount);
     answerToSend = r.answerToSend; know = r.know; wrong = r.wrong;
+    // real-time AI fallback when question+choices are on the device and answer unknown
+    if (!know && process.env.OPENAI_API_KEY) {
+      try {
+        const qText = question.title || question.question || question.text || (qData2 && (qData2.question||qData2.title)) || '';
+        const ch = Array.isArray(question.choices) ? question.choices.map(c=>c && (c.answer||c.text||c)||'') : (Array.isArray(qData2&&qData2.choices)?qData2.choices.map(c=>c.answer||''):[]);
+        if (qText && ch.length) {
+          mirrorState.source = 'ai-solving';
+          const ai = await Promise.race([aiSolve(qText, ch, question.type || (qData2&&qData2.type)), sleep(10).then(()=>null)]);
+          if (ai !== null && ai !== undefined) { answerToSend = ai; know = true; r.know = true; console.log(color('  [+] AI answer (device-visible question): ' + JSON.stringify(ai), 'green')); }
+        }
+      } catch(e){}
+    }
     if (wrong) console.log(color('  [*] Non-suspicious: intentional miss', 'gray'));
-    else if (know) console.log(color('  [*] Answering correctly', 'gray'));
-    else console.log(color('  [*] Answer unknown, guessing', 'gray'));
+    else if (know) console.log(color('  [*] Answering correctly' + (mirrorState.source==='ai-solving'?' (AI)':''), 'gray'));
+    else console.log(color('  [*] Answer unknown now; will learn from QuestionEnd (private/projector case)', 'gray'));
 
     let delay = 1000;
     if (mode === '1') delay = 300 + Math.floor(Math.random() * 500);
@@ -757,7 +786,7 @@ async function runAutoAnswer() {
     try {
       mirrorState.status = 'question';
       mirrorState.question = (qData2 && (qData2.question || qData2.title)) || `Question ${qi + 1}`;
-      mirrorState.source = know ? (quizUuid ? 'brain/rest/uuid' : 'known') : 'guess/questionEnd';
+      mirrorState.source = know ? (mirrorState.source==='ai-solving'?'ai':(quizUuid ? 'brain/rest/uuid' : 'known')) : 'guess->questionEnd';
       mirrorState.choices = Array.isArray(qData2 && qData2.choices) ? qData2.choices.map(c => c.answer || '') : Array.from({length: choiceCount}, (_,i)=>`Option ${i}`);
       mirrorState.selected = null;
       mirrorState.correct = null;
@@ -865,9 +894,9 @@ async function runAutoAnswer() {
       }
     }
   });
-  client.on('QuizEnd', () => { mirrorState.status = 'ended'; mirrorState.source='ended'; console.log(color('  [+] Quiz ended.', 'cyan')); try { brainLearn({ pin: pin, session: { ended: true, uuid: quizUuid || null, title: leakedTitle||null } }); if (quizUuid && Array.isArray(answerKey)) brainLearn({ uuid: quizUuid, quiz: answerKey, title: leakedTitle }); } catch(e) {} });
+  client.on('QuizEnd', () => { mirrorState.status = 'ended'; mirrorState.source='ended'; console.log(color('  [+] Quiz ended. Shift+Q to quit.', 'cyan')); try { brainLearn({ pin: pin, session: { ended: true, uuid: quizUuid || null, title: leakedTitle||null } }); if (quizUuid && Array.isArray(answerKey)) brainLearn({ uuid: quizUuid, quiz: answerKey, title: leakedTitle }); } catch(e) {} });
   client.on('TwoFactorReset', () => { console.log(color('  [!] 2FA required (host code) - bot cannot answer automatically', 'yellow')); });
-  client.on('Disconnect', (reason) => { console.log(color('  [-] Disconnected: ' + reason, 'red')); process.exit(0); });
+  client.on('Disconnect', (reason) => { mirrorState.status='disconnected'; console.log(color('  [-] Disconnected: ' + (reason||'unknown'), 'red')); console.log(color('  [*] Shift+Q = quit, or wait/restart from menu if you rerun.', 'gray')); });
 
   // If we only have a challenge/UUID (no live PIN join useful) but got answers, show them
   const canJoinLive = /^\d{4,10}$/.test(String(pin||''));
@@ -890,8 +919,9 @@ async function runAutoAnswer() {
   }
   console.log(color(`  [*] Joining game ${pin} as ${name}...`, 'cyan'));
   client.join(String(pin), name + '\u200B').catch(err => {
-    console.log(color('  [-] Join failed: ' + (err.description || err), 'red'));
-    process.exit(1);
+    mirrorState.status='join-failed';
+    console.log(color('  [-] Join failed: ' + (err && (err.description || err.message || err) || 'unknown'), 'red'));
+    console.log(color('  [*] Check PIN (live game must be open). Shift+Q = quit.', 'gray'));
   });
 }
 
