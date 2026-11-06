@@ -51,7 +51,8 @@ function enableRawExit() {
   readline.emitKeypressEvents(process.stdin);
   try { process.stdin.setRawMode(true); } catch (e) {}
   process.stdin.on('keypress', (str, key) => {
-    if (str === 'Q') exitAll();
+    if (str === 'Q' || str === 'q') exitAll();
+    if (str === '3') { leaveAll('Leaver (3)'); }
     if (key && key.ctrl && key.name === 'c') exitAll();
   });
 }
@@ -60,12 +61,17 @@ function enableRawExit() {
 let exiting = false;
 const clients = [];
 function registerClient(c) { if (c) clients.push(c); }
+function leaveAll(reason) {
+  console.log('\n' + color('  [!] ' + (reason || 'Leaver') + ' - poistetaan kaikki botit...', 'yellow'));
+  for (const c of clients) { try { c.leave(); } catch (e) {} }
+  try { mirrorState.status = 'left'; } catch (e) {}
+  console.log(color('  [+] Botit poistettu. Shift+Q = sulje.', 'green'));
+}
 function exitAll() {
   if (exiting) return;
   exiting = true;
-  console.log('\n' + color('  [!] Iso Q - suljetaan JZ Kahoot...', 'yellow'));
-  for (const c of clients) { try { c.leave(); } catch (e) {} }
-  setTimeout(() => process.exit(0), 300);
+  leaveAll('Iso Q - suljetaan');
+  setTimeout(() => process.exit(0), 400);
 }
 
 // ---------- helpers ----------
@@ -175,29 +181,18 @@ function openAIAnswer(apiKey, model, questionText, choices) {
 
 async function findPublicMatches(questionCount, firstChoiceCount, firstCorrect, firstQuestionText, hints) {
   hints = hints || {};
-  // Muisti: tarkista cache (sormenjälki + Q1)
+  // Brain/muisti: tarkista cache (sormenjälki + Q1)
   const mem = loadMemory();
   const key = memKey(questionCount, firstChoiceCount, firstCorrect);
-  if (mem[key]) {
-    const cached = await fetchAnswers(mem[key]);
-    if (cached && Array.isArray(cached) && cached.length === questionCount) {
-      console.log(color('  [+] Muistista: julkinen pohja (' + mem[key] + ')', 'green'));
-      cached.__uuid = mem[key];
-      return [cached];
-    }
-  }
-  // rakenne-cache (pelkkä kysymysmäärä + vaihtoehtomäärät)
   const structKey = questionCount + ':' + (hints.choiceCounts || []).join(',');
-  if (mem[structKey]) {
-    const cached = await fetchAnswers(mem[structKey]);
+  const brainUuid = (_brain.fingerprints[key] && _brain.fingerprints[key].uuid) || mem[key] || (_brain.fingerprints[structKey] && _brain.fingerprints[structKey].uuid) || mem[structKey];
+  if (brainUuid) {
+    const cached = (_brain.quizzes[brainUuid] && _brain.quizzes[brainUuid].questions) || await fetchAnswers(brainUuid);
     if (cached && Array.isArray(cached) && cached.length === questionCount) {
-      cached.__uuid = mem[structKey];
-      // varmista Q1 jos tiedossa
-      if (firstCorrect != null) {
-        const ok = matchQ(cached, 0, firstChoiceCount, firstCorrect);
-        if (ok) { console.log(color('  [+] Muistista (rakenne): ' + mem[structKey], 'green')); return [cached]; }
-      } else {
-        console.log(color('  [+] Muistista (rakenne): ' + mem[structKey], 'green'));
+      const ok = (firstCorrect == null) ? true : matchQ(cached, 0, firstChoiceCount, firstCorrect);
+      if (ok) {
+        cached.__uuid = brainUuid;
+        console.log(color('  [+] Brain/muisti osui: ' + brainUuid, 'green'));
         return [cached];
       }
     }
@@ -272,6 +267,9 @@ async function findPublicMatches(questionCount, firstChoiceCount, firstCorrect, 
       mem2[key] = candidates[0].__uuid;
       if (hints.choiceCounts && hints.choiceCounts.length) mem2[structKey] = candidates[0].__uuid;
       saveMemory(mem2);
+      brainLearn({ fingerprintKey: key, uuid: candidates[0].__uuid, qCount: questionCount, quiz: candidates[0], title: hints.title });
+      if (hints.choiceCounts && hints.choiceCounts.length) brainLearn({ fingerprintKey: structKey, uuid: candidates[0].__uuid, qCount: questionCount });
+      console.log(color('  [+] Opittu brain.jsoniin (' + candidates[0].__uuid + ')', 'green'));
     }
   }
   return candidates;
@@ -298,6 +296,38 @@ function saveMemory(mem) {
 }
 function memKey(questionCount, firstChoiceCount, firstCorrect) {
   return questionCount + ':' + firstChoiceCount + ':' + JSON.stringify(firstCorrect);
+}
+
+// ---------- BRAIN (oppiva muisti / brain.json) ----------
+const BRAIN_FILE = path.join(__dirname, 'brain.json');
+function loadBrain() {
+  try { return JSON.parse(fs.readFileSync(BRAIN_FILE, 'utf8')); } catch (e) {}
+  try { return JSON.parse(fs.readFileSync(path.join(os.homedir(), '.jzkahoot_brain.json'), 'utf8')); } catch (e) {}
+  return { version: 1, fingerprints: {}, quizzes: {}, games: {}, questions: [], stats: { learned: 0 } };
+}
+function saveBrain(brain) {
+  try {
+    brain.updated = new Date().toISOString();
+    const data = JSON.stringify(brain, null, 2);
+    try { fs.writeFileSync(BRAIN_FILE, data); } catch (e) {}
+    try { fs.writeFileSync(path.join(os.homedir(), '.jzkahoot_brain.json'), data); } catch (e) {}
+  } catch (e) {}
+}
+const _brain = loadBrain();
+function brainLearn(obj) {
+  try {
+    if (obj.fingerprintKey && obj.uuid) _brain.fingerprints[obj.fingerprintKey] = { uuid: obj.uuid, qCount: obj.qCount, at: Date.now() };
+    if (obj.uuid && obj.quiz) _brain.quizzes[obj.uuid] = { questions: obj.quiz, title: obj.title || null, at: Date.now() };
+    if (obj.pin && obj.session) {
+      _brain.games[obj.pin] = Object.assign(_brain.games[obj.pin] || {}, obj.session, { at: Date.now() });
+    }
+    if (obj.question) {
+      _brain.questions.push(Object.assign({ at: Date.now() }, obj.question));
+      if (_brain.questions.length > 500) _brain.questions = _brain.questions.slice(-500);
+    }
+    _brain.stats.learned = (_brain.stats.learned || 0) + 1;
+    saveBrain(_brain);
+  } catch (e) {}
 }
 
 function computeAnswer(qData, mode, choiceCount) {
@@ -343,7 +373,7 @@ function banner() {
   console.log(color('   /  / \\ ) (  ) )    (\\__ \\( (__  )(__)( \\__ \\\\__ \\', 'cyan'));
   console.log(color('  (__) (__(____/ )_/\\_( (___/ \\___)(______)(___/( (___', 'cyan'));
   console.log(color('        JZ KAHOOT BOT  -  V3.5  -  TERMUX', 'magenta'));
-  console.log(color('  Auto Answer + Flooder + Leaver  |  Shift+Q = stop', 'gray'));
+  console.log(color('  Auto+Flooder+Leaver | Shift+Q=sulje | 3=leaver kesken', 'gray'));
   console.log('');
 }
 
@@ -456,7 +486,7 @@ async function runAutoAnswer() {
 
   client.on('Joined', (settings) => {
     console.log(color('  [+] Liitytty peliin. Odotetaan aloitusta...', 'green'));
-    mirrorState.status = 'joined';
+    mirrorState.status = 'joined'; try { brainLearn({ pin: pin, session: { mode: 'auto', name: name, joined: true } }); } catch(e) {}
     // harvest leaked metadata from session/settings
     try {
       const meta = extractMeta(settings);
@@ -604,7 +634,10 @@ async function runAutoAnswer() {
       const n = Math.max(q.choices.length, (mirrorState.choices && mirrorState.choices.length) || 0, correct.reduce((a,b)=>Math.max(a,b+1),0));
       while (q.choices.length < n) q.choices.push({ answer: '', correct: false });
       correct.forEach(i => { if (q.choices[i]) q.choices[i].correct = true; });
+      q.question = mirrorState.question || q.question;
       answerKey[idx] = q;
+      // opi brainiin
+      try { brainLearn({ question: { pin: mirrorState.pin, qi: idx, correct, choiceCount: n, text: mirrorState.question } }); } catch (e) {}
 
       // Sormenjälkihaku julkisista pohjista (vain ensimmäisen kysymyksen jälkeen)
       if (idx === 0) {
@@ -677,7 +710,7 @@ async function runAutoAnswer() {
       }
     }
   });
-  client.on('QuizEnd', () => { mirrorState.status = 'ended'; console.log(color('  [+] Peli paattyi.', 'cyan')); });
+  client.on('QuizEnd', () => { mirrorState.status = 'ended'; console.log(color('  [+] Peli paattyi.', 'cyan')); try { brainLearn({ pin: pin, session: { ended: true, uuid: quizUuid || null } }); if (quizUuid && Array.isArray(answerKey)) brainLearn({ uuid: quizUuid, quiz: answerKey, title: leakedTitle }); } catch(e) {} });
   client.on('TwoFactorReset', () => { console.log(color('  [!] 2FA vaaditaan (hostin koodi) - botti ei voi vastata automaattisesti', 'yellow')); });
   client.on('Disconnect', (reason) => { console.log(color('  [-] Katkesi: ' + reason, 'red')); process.exit(0); });
 
