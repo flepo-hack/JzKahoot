@@ -64,9 +64,9 @@ function enableRawExit() {
   process.stdin.on('keypress', onKey);
   // fallback for terminals where keypress is unreliable
   process.stdin.on('data', (buf) => {
-    const b = String(buf || '');
-    if (b.indexOf('Q') !== -1 || b.indexOf('q') !== -1) exitAll();
-    else if (b.indexOf('3') !== -1) leaveAll('Leaver (3)');
+    const b = String(buf || '').trim();
+    if (b === 'Q' || b === 'q') exitAll();
+    else if (b === '3') leaveAll('Leaver (3)');
     else if (b === '\u0003') exitAll();
   });
   console.log(color('  [*] Controls: Q = quit, 3 = leave bots | debug: ' + JZ_RAWLOG, 'gray'));
@@ -521,9 +521,7 @@ setInterval(tick,450);tick();
       _mirrorSrv = srv; mirrorState.overlayUrl = 'http://127.0.0.1:' + p;
       console.log(color('  [UI] Overlay (mini): ' + mirrorState.overlayUrl, 'cyan'));
       console.log(color('  [UI] Tip: open in Chrome, then use split-screen/popup; Termux cannot draw a native floating overlay without extra Android permissions.', 'gray'));
-      try { require('child_process').exec('termux-open-url ' + mirrorState.overlayUrl, {timeout:2000}); } catch (e) {}
-      try { require('child_process').exec('am start -a android.intent.action.VIEW -d ' + mirrorState.overlayUrl + ' com.android.chrome', {timeout:2000}); } catch (e) {}
-      try { require('child_process').exec('am start -a android.intent.action.VIEW -d ' + mirrorState.overlayUrl, {timeout:2000}); } catch (e) {}
+      // no auto-open browser (user requested); URL printed above for manual open
     });
   }
   tryListen(port, 0);
@@ -583,12 +581,11 @@ async function runAutoAnswer() {
   let candidatePos = 0;
   let firstQuestionText = null;
   let _rawCorrect = [];
+  const client = new Kahoot();
   try { rawLog('client.challengeData', client.challengeData); } catch(e){}
   try { rawLog('client.quiz', client.quiz); } catch(e){}
   try { rawLog('client.defaults', client.defaults); } catch(e){}
   try { rawLog('client.snapshot', { keys: Object.keys(client||{}), team: client.team, name: client.name, cid: client.cid, gameid: client.gameid, totalScore: client.totalScore, hasHandlers: !!client.handlers, hasClasses: !!client.classes }); } catch(e){}
-
-  const client = new Kahoot();
   registerClient(client);
   function hookSocket(sock) {
     try {
@@ -733,7 +730,8 @@ async function runAutoAnswer() {
   function tryLoadUuid(u, source) {
     if (!u || answerKey) return;
     // check brain/memory for same quiz seen before
-    const cached = (_brain.quizzes[u] && _brain.quizzes[u].questions) || mem[u];
+    const _mem = (typeof loadMemory === 'function') ? loadMemory() : {};
+    const cached = (_brain.quizzes[u] && _brain.quizzes[u].questions) || _mem[u];
     if (Array.isArray(cached) && cached.length) {
       quizUuid = u; answerKey = cached;
       mirrorState.quizTitle = (_brain.quizzes[u] && _brain.quizzes[u].title) || leakedTitle || mirrorState.quizTitle || '';
