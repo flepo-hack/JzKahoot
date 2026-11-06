@@ -165,7 +165,7 @@ function normalizeQuizQuestions(data) {
     // challenge answers/progress shape -> map to question-like objects with choices
     return data.answers.map((a, i) => {
       const choices = Array.isArray(a.answers) ? a.answers : (Array.isArray(a.choices) ? a.choices : []);
-      return { question: a.question || ('Question ' + (i+1)), choices: choices.map(c => typeof c==='string'?{answer:c,correct:false}:{answer:c.answer||c.text||'', correct:!!c.correct, index:c.index}) };
+      return { question: a.question || ('Question ' + (i+1)), choices: choices.map(c => typeof c==='string'?{answer:c,correct:false}:{answer:c.answer||c.text||'', correct:!!(c.correct||c.isCorrect), index:c.index}) };
     }).filter(q => q.choices && q.choices.length);
   }
   return null;
@@ -435,7 +435,7 @@ function computeAnswer(qData, mode, choiceCount) {
     } else if (qType === 'jumble') {
       know = true; correctAnswer = [0, 1, 2, 3];
     } else if (Array.isArray(qData.choices)) {
-      const idxs = qData.choices.map((c, i) => (c && c.correct) ? i : -1).filter(i => i >= 0);
+      const idxs = qData.choices.map((c, i) => (c && (c.correct === true || c.isCorrect === true)) ? i : -1).filter(i => i >= 0);
       if (idxs.length > 0) {
         know = true;
         correctAnswer = (qType === 'multiple_select_quiz') ? idxs : idxs[0];
@@ -686,7 +686,16 @@ async function runAutoAnswer() {
             if (Array.isArray(ch) && ch.length && !mirrorState.choices.length) {
               try { mirrorState.choices = ch.map(x=> typeof x==='string'?x : (x&&(x.answer||x.text||x.choice||''))||''); } catch(e){}
             }
-            if (contentParsed.quizTitle && !leakedTitle) leakedTitle = contentParsed.quizTitle;
+            // If Kahoot leaks isCorrect/correct in the payload (sometimes happens), capture full answer key
+          try {
+            if (contentParsed && Array.isArray(contentParsed.choices) && contentParsed.choices.some(c => c && (c.correct === true || c.isCorrect === true)) && typeof contentParsed.questionIndex === 'number') {
+              if (!answerKey || !Array.isArray(answerKey)) answerKey = [];
+              const q = { type: contentParsed.type || contentParsed.gameBlockType || 'quiz', question: contentParsed.title || contentParsed.question || '', choices: contentParsed.choices.map(c => ({ answer: c.answer || c.text || c.choice || '', correct: !!(c.correct || c.isCorrect) })) };
+              answerKey[contentParsed.questionIndex] = q;
+              console.log(color('  [+] Leaked isCorrect in payload for Q' + (contentParsed.questionIndex+1) + '!', 'green'));
+            }
+          } catch(e){}
+          if (contentParsed.quizTitle && !leakedTitle) leakedTitle = contentParsed.quizTitle;
             if (contentParsed.quizName && !leakedTitle) leakedTitle = contentParsed.quizName;
             if (contentParsed.name && /quiz/i.test(String(m&&m.channel||'')) && !leakedTitle) leakedTitle = contentParsed.name;
             if (contentParsed.hostId && !leakedHost) leakedHost = contentParsed.hostId;
@@ -858,7 +867,7 @@ async function runAutoAnswer() {
       const hit = [..._brain.questions].reverse().find(x => x && x.text && similarity(n, String(x.text).toLowerCase().replace(/[^a-z0-9]+/g,' ').trim()) > 0.78);
       if (hit && Array.isArray(hit.correct)) { qData2 = { type: question.type||'quiz', choices: Array.from({length:choiceCount},(_,i)=>({correct: hit.correct.includes(i)})), question: hit.text }; }
     }
-    if (!qData2 && Array.isArray(question.choices) && question.choices.some(c => c && c.correct)) {
+    if (!qData2 && Array.isArray(question.choices) && question.choices.some(c => c && (c.correct === true || c.isCorrect === true || c.correctAnswer === true))) {
       answerKey = [question]; qData2 = question;
     }
     let r = computeAnswer(qData2, mode, choiceCount);
